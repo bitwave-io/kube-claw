@@ -520,6 +520,7 @@ claw secret approve REQUEST_ID --reason TEXT     # break-glass; Slack is primary
 claw secret deny    REQUEST_ID --reason TEXT
 claw secret grants list
 claw secret grant revoke GRANT_ID --reason TEXT
+claw run create --agent NAME --input TEXT   # trigger a run directly (POST /v1/runs) — no Slack
 claw runs list | show RUN_ID | logs RUN_ID
 claw agents list | wake AGENT | sleep AGENT
 ```
@@ -622,6 +623,13 @@ Phase 7  GCP cost example + hardening: example Agent + secrets + Slack values, r
          querying billing (or mock), envtest controller tests, kind e2e, NetworkPolicy, RBAC review.
          AC: full §19 scenario green in kind; agent SA cannot read K8s Secrets.
 ```
+
+**Testability — Slack is intentionally LAST.** The entire secret loop is exercisable
+without Slack via `claw run create --agent NAME --input TEXT` → `POST /v1/runs` (a
+first-class CLI command, not just test scaffolding) plus the CLI break-glass
+`claw secret approve`. The shortest path to a testable end-to-end loop is Phases 1-5 +
+the run-trigger CLI; Phase 6 (Slack) then adds a second *trigger* and *approval channel*
+on top without changing the core. Build in that order — prove the trust loop before Slack.
 
 ---
 
