@@ -22,8 +22,10 @@ import (
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/apihttp"
+	"github.com/traego/kube-claw/internal/approvals"
 	"github.com/traego/kube-claw/internal/controller"
 	"github.com/traego/kube-claw/internal/identity"
+	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/runengine"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store/sqlite"
@@ -101,16 +103,18 @@ func main() {
 		os.Exit(1)
 	}
 	idProvider := &identity.KubernetesSAProvider{Client: clientset, Audience: "claw-controller"}
+	approvalSvc := &approvals.Service{Store: st, Secrets: secSvc, Reader: mgr.GetAPIReader()}
 
 	// HTTP API (uncached reader so /v1/agents works without waiting on caches).
 	if err := mgr.Add(&apihttp.Server{
-		Addr:     apiAddr,
-		Store:    st,
-		Reader:   mgr.GetAPIReader(),
-		Secrets:  secSvc,
-		UIBase:   uiBaseURL,
-		Identity: idProvider,
-		Signer:   signer,
+		Addr:      apiAddr,
+		Store:     st,
+		Reader:    mgr.GetAPIReader(),
+		Secrets:   secSvc,
+		UIBase:    uiBaseURL,
+		Identity:  idProvider,
+		Signer:    signer,
+		Approvals: approvalSvc,
 	}); err != nil {
 		log.Error(err, "unable to add HTTP API server")
 		os.Exit(1)
@@ -120,6 +124,25 @@ func main() {
 	if err := mgr.Add(&apihttp.UIServer{Addr: uiAddr, Secrets: secSvc}); err != nil {
 		log.Error(err, "unable to add UI server")
 		os.Exit(1)
+	}
+
+	// Slack connector (off unless tokens are configured via env).
+	if enableRouter {
+		appTok, botTok := os.Getenv("CLAW_SLACK_APP_TOKEN"), os.Getenv("CLAW_SLACK_BOT_TOKEN")
+		if appTok != "" && botTok != "" {
+			rt := &slackrouter.Router{
+				Config:    slackrouter.Config{}, // routes loaded from config in a later iteration
+				Store:     st,
+				Approvals: approvalSvc,
+			}
+			if err := mgr.Add(&slackrouter.Runnable{Router: rt, AppToken: appTok, BotToken: botTok}); err != nil {
+				log.Error(err, "unable to add slack router")
+				os.Exit(1)
+			}
+			log.Info("slack connector enabled")
+		} else {
+			log.Info("slack connector disabled (no CLAW_SLACK_APP_TOKEN/CLAW_SLACK_BOT_TOKEN)")
+		}
 	}
 
 	// Run engine: launches a Job per Pending run (Phase 5 demo slice).
@@ -143,9 +166,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// dataDir / enableRouter are consumed by the store + router in later phases.
-	_ = dataDir
-	_ = enableRouter
 
 	log.Info("starting claw-controller")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

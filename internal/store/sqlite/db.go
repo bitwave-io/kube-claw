@@ -190,6 +190,18 @@ func (t *tx) MarkRunRunning(id, pod string) error {
 	return err
 }
 
+// SeenEvent records a connector event and reports whether it was a duplicate.
+func (t *tx) SeenEvent(source, eventID string) (bool, error) {
+	res, err := t.tx.Exec(
+		`INSERT OR IGNORE INTO dedupe (source, event_id, seen_at) VALUES (?,?,?)`,
+		source, eventID, store.NowRFC3339())
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 0, nil // 0 rows inserted == already present == duplicate
+}
+
 // MarkRunBlocked sets phase=Blocked (awaiting secret approval).
 func (t *tx) MarkRunBlocked(id string) error {
 	_, err := t.tx.Exec(`UPDATE runs SET phase='Blocked' WHERE id=?`, id)

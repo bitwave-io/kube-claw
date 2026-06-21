@@ -107,6 +107,10 @@ type Tx interface {
 	PendingRequestExists(ns, agent, secretID string) (bool, error)
 	// SetSecretRequestStatus updates a request's status.
 	SetSecretRequestStatus(id, status string) error
+
+	// SeenEvent records a connector event id and reports whether it was already
+	// seen (dedupe). Returns true if this is a DUPLICATE (DESIGN.md §12).
+	SeenEvent(source, eventID string) (bool, error)
 }
 
 // AuditEvent is one append-only audit record (DESIGN.md §21).

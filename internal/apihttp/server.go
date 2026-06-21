@@ -17,7 +17,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -26,6 +25,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
+	"github.com/traego/kube-claw/internal/approvals"
 	"github.com/traego/kube-claw/internal/identity"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
@@ -37,9 +37,10 @@ type Server struct {
 	Store    store.Store
 	Reader   client.Reader     // uncached k8s reader (mgr.GetAPIReader)
 	Secrets  *secrets.Service  // secret authority
-	UIBase   string            // base URL of the intake UI (for returned links)
-	Identity identity.Provider // /login credential verifier
-	Signer   *identity.Signer  // claw session token signer
+	UIBase    string             // base URL of the intake UI (for returned links)
+	Identity  identity.Provider  // /login credential verifier
+	Signer    *identity.Signer   // claw session token signer
+	Approvals *approvals.Service // shared approval path
 }
 
 // NeedLeaderElection lets the API run on every replica (false = not gated).
@@ -341,51 +342,16 @@ func (s *Server) approveRequest(w http.ResponseWriter, r *http.Request) {
 		body.Approver = "cli"
 	}
 
-	// Load the request, then the live Agent, to bind the grant to current state.
-	var req store.SecretRequest
-	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
-		got, e := tx.GetSecretRequest(id)
-		req = got
-		return e
-	}); errors.Is(err, store.ErrNotFound) {
+	// Break-glass approval (the API/CLI caller is already trusted).
+	grant, err := s.Approvals.Approve(r.Context(), id, body.Approver, body.Reason)
+	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "request not found")
 		return
 	} else if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	binding, err := s.bindingFor(r.Context(), req)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	grant, err := s.Secrets.ApproveRequest(r.Context(), id, body.Approver, body.Reason, binding)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]string{"grant": grant.ID, "status": "approved"})
-}
-
-// bindingFor computes the grant binding from the agent's CURRENT state for the
-// secret named in the request (DESIGN.md §8 — approve what is current).
-func (s *Server) bindingFor(ctx context.Context, req store.SecretRequest) (secrets.GrantBinding, error) {
-	var agent clawv1alpha1.Agent
-	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: req.AgentNamespace, Name: req.AgentName}, &agent); err != nil {
-		return secrets.GrantBinding{}, fmt.Errorf("load agent: %w", err)
-	}
-	for _, sref := range agent.Spec.Secrets {
-		if sref.Name == req.SecretName {
-			return secrets.GrantBinding{
-				ImageDigest:    agent.Status.SelectedImageDigest,
-				AgentSpecHash:  agent.Status.AgentSpecHash,
-				DeliveryHash:   secrets.DeliveryHash(sref.Delivery.Path, sref.Delivery.Mode, sref.Delivery.Env),
-				ServiceAccount: "claw-agent-" + agent.Name,
-			}, nil
-		}
-	}
-	return secrets.GrantBinding{}, fmt.Errorf("agent %s no longer references secret %q", req.AgentName, req.SecretName)
 }
 
 func (s *Server) denyRequest(w http.ResponseWriter, r *http.Request) {
