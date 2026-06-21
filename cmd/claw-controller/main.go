@@ -14,6 +14,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -22,6 +23,7 @@ import (
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/apihttp"
 	"github.com/traego/kube-claw/internal/controller"
+	"github.com/traego/kube-claw/internal/identity"
 	"github.com/traego/kube-claw/internal/runengine"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store/sqlite"
@@ -87,13 +89,28 @@ func main() {
 	}
 	secSvc := &secrets.Service{Store: st, Cipher: cipher}
 
+	// Agent identity: K8s SA TokenReview verifier + claw session-token signer.
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		log.Error(err, "unable to create clientset")
+		os.Exit(1)
+	}
+	signer, err := identity.NewSigner()
+	if err != nil {
+		log.Error(err, "unable to create token signer")
+		os.Exit(1)
+	}
+	idProvider := &identity.KubernetesSAProvider{Client: clientset, Audience: "claw-controller"}
+
 	// HTTP API (uncached reader so /v1/agents works without waiting on caches).
 	if err := mgr.Add(&apihttp.Server{
-		Addr:    apiAddr,
-		Store:   st,
-		Reader:  mgr.GetAPIReader(),
-		Secrets: secSvc,
-		UIBase:  uiBaseURL,
+		Addr:     apiAddr,
+		Store:    st,
+		Reader:   mgr.GetAPIReader(),
+		Secrets:  secSvc,
+		UIBase:   uiBaseURL,
+		Identity: idProvider,
+		Signer:   signer,
 	}); err != nil {
 		log.Error(err, "unable to add HTTP API server")
 		os.Exit(1)

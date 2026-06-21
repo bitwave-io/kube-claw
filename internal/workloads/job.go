@@ -51,14 +51,18 @@ func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText string) *b
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					Containers: []corev1.Container{{
-						Name:  "runner",
+						Name:  "agent",
 						Image: runnerImage,
+						// bootstrap performs /login + materialize, then execs the runner.
+						Command: []string{"/claw/bootstrap", "/claw/runner"},
 						Env: []corev1.EnvVar{
 							{Name: "CLAW_RUN_ID", Value: run.ID},
 							{Name: "CLAW_AGENT_NAME", Value: run.AgentName},
 							{Name: "CLAW_AGENT_NAMESPACE", Value: run.AgentNamespace},
 							{Name: "CLAW_CONTROLLER_URL", Value: controllerURL},
 							{Name: "CLAW_INPUT", Value: inputText},
+							{Name: "CLAW_SECRETS_DIR", Value: "/var/run/claw/secrets"},
+							{Name: "CLAW_SA_TOKEN_FILE", Value: "/var/run/claw/sa-token/token"},
 						},
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: ptr(false),
@@ -75,7 +79,25 @@ func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText string) *b
 								corev1.ResourceMemory: mustQty("256Mi"),
 							},
 						},
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "claw-secrets", MountPath: "/var/run/claw/secrets"},
+							{Name: "sa-token", MountPath: "/var/run/claw/sa-token", ReadOnly: true},
+						},
 					}},
+					Volumes: []corev1.Volume{
+						{Name: "claw-secrets", VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory},
+						}},
+						{Name: "sa-token", VolumeSource: corev1.VolumeSource{
+							Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{
+								ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+									Audience:          "claw-controller",
+									ExpirationSeconds: ptr(int64(3600)),
+									Path:              "token",
+								},
+							}}},
+						}},
+					},
 				},
 			},
 		},

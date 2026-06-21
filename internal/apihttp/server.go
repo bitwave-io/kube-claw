@@ -26,17 +26,20 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
+	"github.com/traego/kube-claw/internal/identity"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
 )
 
 // Server is a controller-runtime Runnable that serves the HTTP API.
 type Server struct {
-	Addr    string
-	Store   store.Store
-	Reader  client.Reader     // uncached k8s reader (mgr.GetAPIReader)
-	Secrets *secrets.Service  // secret authority
-	UIBase  string            // base URL of the intake UI (for returned links)
+	Addr     string
+	Store    store.Store
+	Reader   client.Reader     // uncached k8s reader (mgr.GetAPIReader)
+	Secrets  *secrets.Service  // secret authority
+	UIBase   string            // base URL of the intake UI (for returned links)
+	Identity identity.Provider // /login credential verifier
+	Signer   *identity.Signer  // claw session token signer
 }
 
 // NeedLeaderElection lets the API run on every replica (false = not gated).
@@ -79,6 +82,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /v1/secret-requests/{id}/deny", s.denyRequest)
 	mux.HandleFunc("GET /v1/secret-grants", s.listGrants)
 	mux.HandleFunc("POST /v1/secret-grants/{id}/revoke", s.revokeGrant)
+	mux.HandleFunc("POST /v1/login", s.login)
+	mux.HandleFunc("POST /v1/runs/{id}/materialize", s.materialize)
 	return mux
 }
 

@@ -35,13 +35,21 @@ func main() {
 	fmt.Println("claw-runner: output recorded, exiting 0")
 }
 
-// respond is the stub "agent". Replace with a real agent loop (LLM + secrets).
+// respond is the stub "agent". It proves the materialized credential is present
+// (size only — NEVER the content) without doing real GCP calls yet.
 func respond(input string) string {
 	if input == "" {
 		input = "(no question provided)"
 	}
-	return fmt.Sprintf("Demo response: I received %q. (stub runner — no GCP data yet; "+
-		"the secret-gated cost agent lands in a later phase.)", input)
+	cred := ""
+	if p := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			cred = fmt.Sprintf(" [credential materialized at %s: %d bytes]", p, len(b))
+		} else {
+			cred = fmt.Sprintf(" [credential expected at %s but unreadable: %v]", p, err)
+		}
+	}
+	return fmt.Sprintf("Demo response: I received %q.%s (stub runner — no real GCP calls yet.)", input, cred)
 }
 
 func postOutput(controllerURL, runID, content string) error {
