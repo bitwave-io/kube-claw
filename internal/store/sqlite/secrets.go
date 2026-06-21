@@ -14,8 +14,8 @@ func (t *tx) CreateSecret(s store.Secret) error {
 		s.CreatedAt = store.NowRFC3339()
 	}
 	if _, err := t.tx.Exec(
-		`INSERT INTO secrets (id, namespace, name, type, created_at) VALUES (?,?,?,?,?)`,
-		s.ID, s.Namespace, s.Name, s.Type, s.CreatedAt,
+		`INSERT INTO secrets (id, namespace, name, type, description, created_at) VALUES (?,?,?,?,?,?)`,
+		s.ID, s.Namespace, s.Name, s.Type, s.Description, s.CreatedAt,
 	); err != nil {
 		return fmt.Errorf("create secret: %w", err)
 	}
@@ -32,18 +32,18 @@ func (t *tx) CreateSecret(s store.Secret) error {
 // GetSecret returns secret metadata (with granters) by namespace/name.
 func (t *tx) GetSecret(namespace, name string) (store.Secret, error) {
 	var s store.Secret
-	var typ sql.NullString
+	var typ, desc sql.NullString
 	err := t.tx.QueryRow(
-		`SELECT id, namespace, name, type, created_at FROM secrets WHERE namespace=? AND name=?`,
+		`SELECT id, namespace, name, type, description, created_at FROM secrets WHERE namespace=? AND name=?`,
 		namespace, name,
-	).Scan(&s.ID, &s.Namespace, &s.Name, &typ, &s.CreatedAt)
+	).Scan(&s.ID, &s.Namespace, &s.Name, &typ, &desc, &s.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.Secret{}, store.ErrNotFound
 	}
 	if err != nil {
 		return store.Secret{}, err
 	}
-	s.Type = typ.String
+	s.Type, s.Description = typ.String, desc.String
 
 	rows, err := t.tx.Query(`SELECT principal FROM secret_granters WHERE secret_id=?`, s.ID)
 	if err != nil {

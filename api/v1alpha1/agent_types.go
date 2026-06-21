@@ -13,12 +13,18 @@ type AgentSpec struct {
 	// +optional
 	DisplayName string `json:"displayName,omitempty"`
 
-	// Image is the agent runtime image. It MUST be pinned to a digest
+	// Image is the agent runtime image. When set it MUST be pinned to a digest
 	// (contains "@sha256:") so secret grants bind to immutable code — a tag is
-	// rejected at apply time by the CEL rule below (DESIGN.md §6, §9).
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:XValidation:rule="self.contains('@sha256:')",message="image must be pinned to a digest (must contain @sha256:)"
-	Image string `json:"image"`
+	// rejected at apply time. Optional when BaseImageRef is used instead
+	// (DESIGN.md §6, §9, §23).
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.contains('@sha256:')",message="image must be empty or pinned to a digest (@sha256:)"
+	Image string `json:"image,omitempty"`
+
+	// BaseImageRef names a registered base image (BaseImage registry) the
+	// controller resolves to a concrete image. Takes precedence over Image.
+	// +optional
+	BaseImageRef string `json:"baseImageRef,omitempty"`
 
 	// Runtime controls scale-to-zero session behavior.
 	// +optional

@@ -132,11 +132,12 @@ func (s *Server) auditLoginFail(ctx context.Context, runID, reason string) {
 
 // materializeSecret is one secret payload returned to the bootstrap.
 type materializeSecret struct {
-	Name    string            `json:"name"`
-	Path    string            `json:"path"`
-	Mode    string            `json:"mode"`
-	Env     map[string]string `json:"env"`
-	Content string            `json:"content"` // base64 of plaintext
+	Name        string            `json:"name"`
+	Description string            `json:"description"` // usage context for the agent (not the value)
+	Path        string            `json:"path"`
+	Mode        string            `json:"mode"`
+	Env         map[string]string `json:"env"`
+	Content     string            `json:"content"` // base64 of plaintext
 }
 
 // materialize returns the approved, decrypted secret payloads for a run. Authn
@@ -174,8 +175,15 @@ func (s *Server) materialize(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "materialize "+sref.Name)
 			return
 		}
+		var desc string
+		_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+			if sec, e := tx.GetSecret(agent.Namespace, sref.Name); e == nil {
+				desc = sec.Description
+			}
+			return nil
+		})
 		out = append(out, materializeSecret{
-			Name: sref.Name, Path: sref.Delivery.Path, Mode: sref.Delivery.Mode,
+			Name: sref.Name, Description: desc, Path: sref.Delivery.Path, Mode: sref.Delivery.Mode,
 			Env: sref.Delivery.Env, Content: base64.StdEncoding.EncodeToString(val),
 		})
 		_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {

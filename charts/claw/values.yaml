@@ -45,8 +45,18 @@ ui:
       enabled: true
       secretName: claw-ui-tls
 
-# References to kube-claw-managed secrets (router-owned Slack tokens, master key).
+# Slack connector. When enabled, the controller reads the app + bot tokens from
+# the named Kubernetes Secret (keys: app-token, bot-token). Create that Secret
+# out-of-band (e.g. via scripts/install.sh, which prompts) — tokens are NOT put
+# in Helm values/history.
 slack:
-  appTokenSecretRef: slack-app-token
-  botTokenSecretRef: slack-bot-token
-masterKeySecretRef: claw-master-key
+  enabled: false
+  tokenSecretName: claw-slack-tokens
+  # Channel → agent routing. Used by both Socket Mode and the fake event endpoint
+  # (so routing is testable without tokens). Example:
+  #   routes:
+  #     - channels: ["C_COST"]
+  #       mentionRequired: false
+  #       agentNamespace: claw-agents
+  #       agentName: gcp-cost
+  routes: []

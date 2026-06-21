@@ -21,10 +21,10 @@ import (
 
 // Route maps a Slack channel (with optional mention requirement) to an agent.
 type Route struct {
-	Channels        []string
-	MentionRequired bool
-	AgentNamespace  string
-	AgentName       string
+	Channels        []string `json:"channels"`
+	MentionRequired bool     `json:"mentionRequired"`
+	AgentNamespace  string   `json:"agentNamespace"`
+	AgentName       string   `json:"agentName"`
 }
 
 // Config is the connector configuration (from Helm values / controller config).

@@ -111,6 +111,15 @@ type Tx interface {
 	// SeenEvent records a connector event id and reports whether it was already
 	// seen (dedupe). Returns true if this is a DUPLICATE (DESIGN.md §12).
 	SeenEvent(source, eventID string) (bool, error)
+
+	// --- base image registry ---
+
+	// CreateBaseImage registers (or replaces) a named base image.
+	CreateBaseImage(b BaseImage) error
+	// GetBaseImage returns a base image by name, or ErrNotFound.
+	GetBaseImage(name string) (BaseImage, error)
+	// ListBaseImages returns all registered base images.
+	ListBaseImages() ([]BaseImage, error)
 }
 
 // AuditEvent is one append-only audit record (DESIGN.md §21).
@@ -149,12 +158,13 @@ type Output struct {
 
 // Secret is secret metadata (the value lives in SecretVersion, encrypted).
 type Secret struct {
-	ID        string   `json:"id"`
-	Namespace string   `json:"namespace"`
-	Name      string   `json:"name"`
-	Type      string   `json:"type,omitempty"`
-	Granters  []string `json:"granters,omitempty"` // PAM: who may approve (DESIGN.md §8)
-	CreatedAt string   `json:"createdAt"`
+	ID          string   `json:"id"`
+	Namespace   string   `json:"namespace"`
+	Name        string   `json:"name"`
+	Type        string   `json:"type,omitempty"`
+	Description string   `json:"description,omitempty"` // usage context for the agent (never the value)
+	Granters    []string `json:"granters,omitempty"`    // PAM: who may approve (DESIGN.md §8)
+	CreatedAt   string   `json:"createdAt"`
 }
 
 // SecretVersion is one immutable, encrypted version of a secret's value.
@@ -198,6 +208,16 @@ type SecretRequest struct {
 	ImageDigest    string `json:"imageDigest"`
 	Context        string `json:"context,omitempty"`
 	CreatedAt      string `json:"createdAt"`
+}
+
+// BaseImage is a registered, reusable agent runtime image (DESIGN.md §23). The
+// description tells operators/agents WHEN to use this base (e.g. "has gcloud +
+// bq, for GCP cost/billing agents").
+type BaseImage struct {
+	Name        string `json:"name"`
+	Image       string `json:"image"`
+	Description string `json:"description,omitempty"`
+	CreatedAt   string `json:"createdAt"`
 }
 
 // NowRFC3339 is the canonical timestamp format used for stored rows.

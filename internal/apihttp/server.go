@@ -27,6 +27,7 @@ import (
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/approvals"
 	"github.com/traego/kube-claw/internal/identity"
+	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
 )
@@ -38,9 +39,10 @@ type Server struct {
 	Reader   client.Reader     // uncached k8s reader (mgr.GetAPIReader)
 	Secrets  *secrets.Service  // secret authority
 	UIBase    string             // base URL of the intake UI (for returned links)
-	Identity  identity.Provider  // /login credential verifier
-	Signer    *identity.Signer   // claw session token signer
-	Approvals *approvals.Service // shared approval path
+	Identity  identity.Provider   // /login credential verifier
+	Signer    *identity.Signer    // claw session token signer
+	Approvals *approvals.Service  // shared approval path
+	Router    *slackrouter.Router // connector routing (nil if no routes configured)
 }
 
 // NeedLeaderElection lets the API run on every replica (false = not gated).
@@ -73,6 +75,7 @@ func (s *Server) handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/agents", s.listAgents)
 	mux.HandleFunc("POST /v1/runs", s.createRun)
+	mux.HandleFunc("GET /v1/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/outputs", s.postOutput)
 	mux.HandleFunc("POST /v1/secrets", s.createSecret)
@@ -85,6 +88,11 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /v1/secret-grants/{id}/revoke", s.revokeGrant)
 	mux.HandleFunc("POST /v1/login", s.login)
 	mux.HandleFunc("POST /v1/runs/{id}/materialize", s.materialize)
+	mux.HandleFunc("POST /v1/base-images", s.createBaseImage)
+	mux.HandleFunc("GET /v1/base-images", s.listBaseImages)
+	mux.HandleFunc("GET /ui/base-images", s.baseImagesPage)
+	mux.HandleFunc("POST /ui/base-images", s.baseImagesSubmit)
+	mux.HandleFunc("POST /v1/connectors/slack/events", s.slackEvent)
 	return mux
 }
 
@@ -152,6 +160,22 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": run.ID, "phase": run.Phase})
+}
+
+func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
+	var runs []store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.ListRuns(100)
+		runs = got
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if runs == nil {
+		runs = []store.Run{}
+	}
+	writeJSON(w, http.StatusOK, runs)
 }
 
 type runView struct {
@@ -232,10 +256,11 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 // --- secrets (Phase 3) ---
 
 type createSecretReq struct {
-	Namespace string   `json:"namespace"`
-	Name      string   `json:"name"`
-	Type      string   `json:"type"`
-	Granters  []string `json:"granters"`
+	Namespace   string   `json:"namespace"`
+	Name        string   `json:"name"`
+	Type        string   `json:"type"`
+	Description string   `json:"description"`
+	Granters    []string `json:"granters"`
 }
 
 // createSecret records metadata + granters and mints a one-time intake link.
@@ -249,7 +274,7 @@ func (s *Server) createSecret(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "namespace and name are required")
 		return
 	}
-	sec, err := s.Secrets.CreateSecret(r.Context(), req.Namespace, req.Name, req.Type, req.Granters)
+	sec, err := s.Secrets.CreateSecret(r.Context(), req.Namespace, req.Name, req.Type, req.Description, req.Granters)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -308,6 +333,38 @@ func (s *Server) putSecretVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stored"})
+}
+
+// slackEventReq simulates a Slack message (the fake event-ingestion endpoint,
+// DESIGN.md §32). The real Socket Mode transport drives the same Router path.
+type slackEventReq struct {
+	EventID   string `json:"eventId"`
+	Channel   string `json:"channel"`
+	SessionID string `json:"sessionId"`
+	Text      string `json:"text"`
+	Mentioned bool   `json:"mentioned"`
+}
+
+func (s *Server) slackEvent(w http.ResponseWriter, r *http.Request) {
+	if s.Router == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no slack routes configured")
+		return
+	}
+	var req slackEventReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Channel == "" || req.EventID == "" {
+		writeErr(w, http.StatusBadRequest, "eventId and channel are required")
+		return
+	}
+	runID, err := s.Router.HandleMessage(r.Context(), req.EventID, req.Channel, req.SessionID, req.Text, req.Mentioned)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if runID == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored (no route match or duplicate)"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"runId": runID})
 }
 
 // --- approval (Phase 4) ---

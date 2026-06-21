@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
@@ -105,6 +106,15 @@ func main() {
 	idProvider := &identity.KubernetesSAProvider{Client: clientset, Audience: "claw-controller"}
 	approvalSvc := &approvals.Service{Store: st, Secrets: secSvc, Reader: mgr.GetAPIReader()}
 
+	// Slack connector router (channel→agent routing + run creation). Built when
+	// routes are configured; usable via the fake event endpoint regardless of
+	// tokens. The Socket Mode transport is added separately when tokens exist.
+	var slackRt *slackrouter.Router
+	if routes := parseSlackRoutes(os.Getenv("CLAW_SLACK_ROUTES")); len(routes) > 0 {
+		slackRt = &slackrouter.Router{Config: slackrouter.Config{Routes: routes}, Store: st, Approvals: approvalSvc}
+		log.Info("slack routes configured", "count", len(routes))
+	}
+
 	// HTTP API (uncached reader so /v1/agents works without waiting on caches).
 	if err := mgr.Add(&apihttp.Server{
 		Addr:      apiAddr,
@@ -115,6 +125,7 @@ func main() {
 		Identity:  idProvider,
 		Signer:    signer,
 		Approvals: approvalSvc,
+		Router:    slackRt,
 	}); err != nil {
 		log.Error(err, "unable to add HTTP API server")
 		os.Exit(1)
@@ -126,22 +137,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Slack connector (off unless tokens are configured via env).
-	if enableRouter {
+	// Slack Socket Mode transport: only when routes + tokens are present. The
+	// fake event endpoint works without tokens for local testing.
+	if enableRouter && slackRt != nil {
 		appTok, botTok := os.Getenv("CLAW_SLACK_APP_TOKEN"), os.Getenv("CLAW_SLACK_BOT_TOKEN")
 		if appTok != "" && botTok != "" {
-			rt := &slackrouter.Router{
-				Config:    slackrouter.Config{}, // routes loaded from config in a later iteration
-				Store:     st,
-				Approvals: approvalSvc,
-			}
-			if err := mgr.Add(&slackrouter.Runnable{Router: rt, AppToken: appTok, BotToken: botTok}); err != nil {
-				log.Error(err, "unable to add slack router")
+			if err := mgr.Add(&slackrouter.Runnable{Router: slackRt, AppToken: appTok, BotToken: botTok}); err != nil {
+				log.Error(err, "unable to add slack socket mode")
 				os.Exit(1)
 			}
-			log.Info("slack connector enabled")
+			log.Info("slack socket mode enabled")
 		} else {
-			log.Info("slack connector disabled (no CLAW_SLACK_APP_TOKEN/CLAW_SLACK_BOT_TOKEN)")
+			log.Info("slack socket mode disabled (no tokens); fake event endpoint available")
 		}
 	}
 
@@ -172,4 +179,18 @@ func main() {
 		log.Error(err, "manager exited with error")
 		os.Exit(1)
 	}
+}
+
+// parseSlackRoutes parses CLAW_SLACK_ROUTES (a JSON array of routes) into the
+// router config. Invalid JSON logs and yields no routes.
+func parseSlackRoutes(s string) []slackrouter.Route {
+	if s == "" {
+		return nil
+	}
+	var routes []slackrouter.Route
+	if err := json.Unmarshal([]byte(s), &routes); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "invalid CLAW_SLACK_ROUTES json")
+		return nil
+	}
+	return routes
 }

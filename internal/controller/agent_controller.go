@@ -57,18 +57,24 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Resolve the digest. The CRD CEL rule enforces "@sha256:" at apply time, but
-	// be defensive: a missing digest is a clear, surfaced failure, not a panic.
-	digest, err := imageDigest(agent.Spec.Image)
-	if err != nil {
-		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
-			Type:    "Ready",
-			Status:  metav1.ConditionFalse,
-			Reason:  "InvalidImage",
-			Message: err.Error(),
-		})
-		agent.Status.Phase = "Failed"
-		return ctrl.Result{}, r.statusUpdate(ctx, &agent)
+	// Resolve the digest from an inline image. Agents may instead use
+	// baseImageRef (resolved by the run engine), in which case there is no inline
+	// digest to record here. The CRD CEL rule already enforces "@sha256:" on a
+	// non-empty image at apply time; be defensive anyway.
+	digest := ""
+	if agent.Spec.Image != "" {
+		d, err := imageDigest(agent.Spec.Image)
+		if err != nil {
+			meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+				Type:    "Ready",
+				Status:  metav1.ConditionFalse,
+				Reason:  "InvalidImage",
+				Message: err.Error(),
+			})
+			agent.Status.Phase = "Failed"
+			return ctrl.Result{}, r.statusUpdate(ctx, &agent)
+		}
+		digest = d
 	}
 
 	if err := r.ensureServiceAccount(ctx, &agent); err != nil {

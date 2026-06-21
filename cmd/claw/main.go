@@ -31,14 +31,14 @@ func newRootCmd() *cobra.Command {
 		def = "http://localhost:8443"
 	}
 	root.PersistentFlags().StringVar(&controllerURL, "controller-url", def, "controller API base URL")
-	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd())
+	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd(), newAgentsCmd(), newBaseImageCmd())
 	return root
 }
 
 func newSecretCmd() *cobra.Command {
 	c := &cobra.Command{Use: "secret", Short: "Manage secrets"}
 
-	var ns, typ string
+	var ns, typ, description string
 	var granters []string
 	create := &cobra.Command{
 		Use:   "create NAME",
@@ -47,7 +47,7 @@ func newSecretCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out map[string]string
 			if err := apiJSON(http.MethodPost, "/v1/secrets", map[string]any{
-				"namespace": ns, "name": args[0], "type": typ, "granters": granters,
+				"namespace": ns, "name": args[0], "type": typ, "description": description, "granters": granters,
 			}, &out); err != nil {
 				return err
 			}
@@ -58,6 +58,7 @@ func newSecretCmd() *cobra.Command {
 	}
 	create.Flags().StringVar(&ns, "namespace", "claw-agents", "namespace")
 	create.Flags().StringVar(&typ, "type", "", "secret type")
+	create.Flags().StringVar(&description, "description", "", "what the secret is / how the agent should use it")
 	create.Flags().StringArrayVar(&granters, "granter", nil, "granter principal (repeatable)")
 
 	var putNS, fromFile string
@@ -165,12 +166,42 @@ func newRunCmd() *cobra.Command {
 
 func newRunsCmd() *cobra.Command {
 	c := &cobra.Command{Use: "runs", Short: "Inspect runs"}
-	c.AddCommand(&cobra.Command{
-		Use: "show RUN_ID", Short: "Show a run", Args: cobra.ExactArgs(1),
+	c.AddCommand(
+		&cobra.Command{Use: "list", Short: "List runs", RunE: func(_ *cobra.Command, _ []string) error {
+			return apiPrint(http.MethodGet, "/v1/runs")
+		}},
+		&cobra.Command{Use: "show RUN_ID", Short: "Show a run", Args: cobra.ExactArgs(1),
+			RunE: func(_ *cobra.Command, args []string) error {
+				return apiPrint(http.MethodGet, "/v1/runs/"+args[0])
+			}},
+	)
+	return c
+}
+
+func newBaseImageCmd() *cobra.Command {
+	c := &cobra.Command{Use: "baseimage", Short: "Manage base images"}
+	var image, description string
+	create := &cobra.Command{
+		Use: "create NAME", Short: "Register a base image (with a 'when to use' description)", Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiPrint(http.MethodGet, "/v1/runs/"+args[0])
+			return apiJSON(http.MethodPost, "/v1/base-images",
+				map[string]any{"name": args[0], "image": image, "description": description}, nil)
 		},
-	})
+	}
+	create.Flags().StringVar(&image, "image", "", "container image (digest-pinned for prod)")
+	create.Flags().StringVar(&description, "description", "", "when to use this base image")
+	_ = create.MarkFlagRequired("image")
+	c.AddCommand(create, &cobra.Command{Use: "list", Short: "List base images", RunE: func(_ *cobra.Command, _ []string) error {
+		return apiPrint(http.MethodGet, "/v1/base-images")
+	}})
+	return c
+}
+
+func newAgentsCmd() *cobra.Command {
+	c := &cobra.Command{Use: "agents", Short: "Inspect agents"}
+	c.AddCommand(&cobra.Command{Use: "list", Short: "List agents", RunE: func(_ *cobra.Command, _ []string) error {
+		return apiPrint(http.MethodGet, "/v1/agents")
+	}})
 	return c
 }
 

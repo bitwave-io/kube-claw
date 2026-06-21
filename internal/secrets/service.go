@@ -21,14 +21,15 @@ type Service struct {
 }
 
 // CreateSecret records metadata + granters (no value yet) and audits.
-func (s *Service) CreateSecret(ctx context.Context, namespace, name, typ string, granters []string) (store.Secret, error) {
+func (s *Service) CreateSecret(ctx context.Context, namespace, name, typ, description string, granters []string) (store.Secret, error) {
 	sec := store.Secret{
-		ID:        newID("sec"),
-		Namespace: namespace,
-		Name:      name,
-		Type:      typ,
-		Granters:  granters,
-		CreatedAt: store.NowRFC3339(),
+		ID:          newID("sec"),
+		Namespace:   namespace,
+		Name:        name,
+		Type:        typ,
+		Description: description,
+		Granters:    granters,
+		CreatedAt:   store.NowRFC3339(),
 	}
 	err := s.Store.Tx(ctx, func(tx store.Tx) error {
 		if err := tx.CreateSecret(sec); err != nil {

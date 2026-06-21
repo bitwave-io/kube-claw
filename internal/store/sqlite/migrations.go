@@ -26,12 +26,13 @@ var migrations = []string{
 	);`,
 
 	`CREATE TABLE IF NOT EXISTS secrets (
-		id         TEXT PRIMARY KEY,
-		namespace  TEXT NOT NULL,
-		name       TEXT NOT NULL,
-		type       TEXT,
-		labels     TEXT,
-		created_at TEXT NOT NULL,
+		id          TEXT PRIMARY KEY,
+		namespace   TEXT NOT NULL,
+		name        TEXT NOT NULL,
+		type        TEXT,
+		description TEXT,
+		labels      TEXT,
+		created_at  TEXT NOT NULL,
 		UNIQUE(namespace, name)
 	);`,
 	`CREATE TABLE IF NOT EXISTS secret_granters (
@@ -108,6 +109,12 @@ var migrations = []string{
 		event_id TEXT NOT NULL,
 		seen_at  TEXT NOT NULL,
 		PRIMARY KEY (source, event_id)
+	);`,
+	`CREATE TABLE IF NOT EXISTS base_images (
+		name        TEXT PRIMARY KEY,
+		image       TEXT NOT NULL,
+		description TEXT,
+		created_at  TEXT NOT NULL
 	);`,
 	`CREATE TABLE IF NOT EXISTS intake_tokens (
 		token_hash  TEXT PRIMARY KEY,

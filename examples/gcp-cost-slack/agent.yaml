@@ -5,9 +5,10 @@ metadata:
   namespace: claw-agents
 spec:
   displayName: GCP Cost Monitor
-  # Digest is a placeholder for the smoke test — Phase 1 only resolves the digest
-  # string into status; it does not pull the image (pod creation is Phase 5).
-  image: ghcr.io/example/claw/gcp-cost@sha256:1111111111111111111111111111111111111111111111111111111111111111
+  # Reference a registered base image (see `claw baseimage` / the /ui/base-images
+  # page). The run engine resolves it to a concrete image at launch. On GKE point
+  # this at the gcloud base; locally it can point at the arm64 stub runner.
+  baseImageRef: gcp-cost-base
   runtime:
     mode: scaleToZeroSession
     idleTimeout: 15m

@@ -1,0 +1,20 @@
+# Helm overrides to enable the Slack connector + public secret-intake Ingress.
+# Apply with: helm upgrade claw ./charts/claw -n claw-system -f examples/gcp-cost-slack/values-slack.yaml
+#
+# The Slack app/bot tokens are read by the controller from the environment
+# (CLAW_SLACK_APP_TOKEN / CLAW_SLACK_BOT_TOKEN). Provide them via a Kubernetes
+# Secret + envFrom in your own values, or set them on the StatefulSet. They are
+# intentionally NOT baked into this file.
+
+controller:
+  # Point returned intake links at your real, TLS-terminated UI host.
+  uiBaseURL: https://claw.example.com
+
+ui:
+  ingress:
+    enabled: true
+    host: claw.example.com
+    className: nginx
+    tls:
+      enabled: true
+      secretName: claw-ui-tls

@@ -32,7 +32,7 @@ func TestService_CreatePutGet(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestService(t)
 
-	if _, err := svc.CreateSecret(ctx, "claw-agents", "gcp-billing", "gcp.serviceAccountKey", []string{"U123"}); err != nil {
+	if _, err := svc.CreateSecret(ctx, "claw-agents", "gcp-billing", "gcp.serviceAccountKey", "", []string{"U123"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	secretVal := []byte(`{"private_key":"xyz"}`)
@@ -51,7 +51,7 @@ func TestService_CreatePutGet(t *testing.T) {
 func TestService_IntakeSingleUse(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestService(t)
-	if _, err := svc.CreateSecret(ctx, "claw-agents", "slack-token", "slack", nil); err != nil {
+	if _, err := svc.CreateSecret(ctx, "claw-agents", "slack-token", "slack", "", nil); err != nil {
 		t.Fatal(err)
 	}
 

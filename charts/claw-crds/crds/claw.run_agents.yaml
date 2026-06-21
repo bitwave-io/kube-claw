@@ -52,6 +52,11 @@ spec:
               The Agent is the only kube-claw CRD: base image, storage, and secret refs are
               inline fields here rather than separate CRDs (DESIGN.md §6).
             properties:
+              baseImageRef:
+                description: |-
+                  BaseImageRef names a registered base image (BaseImage registry) the
+                  controller resolves to a concrete image. Takes precedence over Image.
+                type: string
               command:
                 description: |-
                   Command overrides the pod entrypoint. Defaults to the bootstrap+runner
@@ -65,13 +70,14 @@ spec:
                 type: string
               image:
                 description: |-
-                  Image is the agent runtime image. It MUST be pinned to a digest
+                  Image is the agent runtime image. When set it MUST be pinned to a digest
                   (contains "@sha256:") so secret grants bind to immutable code — a tag is
-                  rejected at apply time by the CEL rule below (DESIGN.md §6, §9).
+                  rejected at apply time. Optional when BaseImageRef is used instead
+                  (DESIGN.md §6, §9, §23).
                 type: string
                 x-kubernetes-validations:
-                - message: image must be pinned to a digest (must contain @sha256:)
-                  rule: self.contains('@sha256:')
+                - message: image must be empty or pinned to a digest (@sha256:)
+                  rule: self == '' || self.contains('@sha256:')
               model:
                 description: Model configures the LLM provider and system prompt.
                 properties:
@@ -222,8 +228,6 @@ spec:
                     - mountPath
                     type: object
                 type: object
-            required:
-            - image
             type: object
           status:
             description: AgentStatus is the observed state of an Agent.

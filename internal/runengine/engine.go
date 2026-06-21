@@ -145,7 +145,28 @@ func (e *Engine) evaluate(ctx context.Context, run store.Run) {
 		}
 		return
 	}
-	e.launch(ctx, run)
+	e.launch(ctx, run, &agent)
+}
+
+// resolveImage picks the image for a run's Job: a registered base image
+// (baseImageRef) wins, then the agent's inline image, then the global fallback.
+func (e *Engine) resolveImage(ctx context.Context, agent *clawv1alpha1.Agent) string {
+	if agent.Spec.BaseImageRef != "" {
+		var img string
+		_ = e.Store.Tx(ctx, func(tx store.Tx) error {
+			if b, err := tx.GetBaseImage(agent.Spec.BaseImageRef); err == nil {
+				img = b.Image
+			}
+			return nil
+		})
+		if img != "" {
+			return img
+		}
+	}
+	if agent.Spec.Image != "" {
+		return agent.Spec.Image
+	}
+	return e.RunnerImage
 }
 
 // ensureGrantOrRequest reports whether a valid grant exists for the secret; if
@@ -184,10 +205,11 @@ func (e *Engine) ensureGrantOrRequest(ctx context.Context, run store.Run, ns, ag
 	return granted, err
 }
 
-func (e *Engine) launch(ctx context.Context, run store.Run) {
+func (e *Engine) launch(ctx context.Context, run store.Run, agent *clawv1alpha1.Agent) {
 	lg := logf.Log.WithName("runengine").WithValues("run", run.ID, "agent", run.AgentName)
 
-	job := workloads.BuildRunJob(run, e.RunnerImage, e.ControllerURL, inputText(run.Input))
+	image := e.resolveImage(ctx, agent)
+	job := workloads.BuildRunJob(run, image, e.ControllerURL, inputText(run.Input))
 	if err := e.K8s.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
 		lg.Error(err, "create job")
 		return

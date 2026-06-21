@@ -49,6 +49,10 @@ func main() {
 	}
 
 	env := append(os.Environ(), "CLAW_TOKEN="+clawTok)
+	type manifestEntry struct {
+		Name, Description, Path string
+	}
+	var manifest []manifestEntry
 	for _, m := range mats {
 		if err := writeSecret(m, secretsDir); err != nil {
 			fatal(fmt.Sprintf("write secret %s: %v", m.Name, err))
@@ -56,6 +60,12 @@ func main() {
 		for k, v := range m.Env {
 			env = append(env, k+"="+v)
 		}
+		manifest = append(manifest, manifestEntry{Name: m.Name, Description: m.Description, Path: m.Path})
+	}
+	// Write a non-sensitive manifest (names + descriptions + paths, NO values) so
+	// the runner / agent loop knows what each materialized secret is for.
+	if mb, err := json.Marshal(manifest); err == nil {
+		_ = os.WriteFile(filepath.Join(secretsDir, ".claw-manifest.json"), mb, 0o400)
 	}
 	fmt.Printf("claw-bootstrap: logged in, materialized %d secret(s), exec %v\n", len(mats), runnerCmd)
 
@@ -91,11 +101,12 @@ func runChild(argv []string, env []string) int {
 }
 
 type matSecret struct {
-	Name    string            `json:"name"`
-	Path    string            `json:"path"`
-	Mode    string            `json:"mode"`
-	Env     map[string]string `json:"env"`
-	Content string            `json:"content"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Path        string            `json:"path"`
+	Mode        string            `json:"mode"`
+	Env         map[string]string `json:"env"`
+	Content     string            `json:"content"`
 }
 
 func login(ctrl, runID, saToken string) (string, error) {

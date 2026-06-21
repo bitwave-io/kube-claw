@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -36,21 +39,107 @@ func main() {
 }
 
 // respond is the stub "agent". It proves the materialized credential is present
-// (size only — NEVER the content) without doing real GCP calls yet.
+// (size only — NEVER the content), reports the secret's description (usage
+// context the agent's LLM would use), and reports whether gcloud is available in
+// the base image. Real GCP calls are a small next step from here.
 func respond(input string) string {
 	if input == "" {
 		input = "(no question provided)"
 	}
-	cred := ""
+
+	var parts []string
+	parts = append(parts, fmt.Sprintf("Demo response: I received %q.", input))
+
+	// Credential presence (size only).
 	if p := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); p != "" {
 		if b, err := os.ReadFile(p); err == nil {
-			cred = fmt.Sprintf(" [credential materialized at %s: %d bytes]", p, len(b))
-		} else {
-			cred = fmt.Sprintf(" [credential expected at %s but unreadable: %v]", p, err)
+			parts = append(parts, fmt.Sprintf("credential present at %s (%d bytes)", p, len(b)))
 		}
 	}
-	return fmt.Sprintf("Demo response: I received %q.%s (stub runner — no real GCP calls yet.)", input, cred)
+
+	// Secret descriptions from the bootstrap manifest (usage context).
+	for _, d := range manifestDescriptions() {
+		if d != "" {
+			parts = append(parts, "secret usage: "+d)
+		}
+	}
+
+	// Real GCP billing query, using the materialized credential. Works on a
+	// gcloud-equipped base image with a real key; otherwise reports why not.
+	if res, err := gcloudCostQuery(); err == nil {
+		parts = append(parts, "GCP billing accounts: "+res)
+	} else {
+		parts = append(parts, "gcloud: "+err.Error())
+	}
+
+	return strings.Join(parts, " | ")
 }
+
+// gcloudCostQuery authenticates with the materialized service-account key and
+// runs a read-only billing query — the real agent action.
+func gcloudCostQuery() (string, error) {
+	gc, err := exec.LookPath("gcloud")
+	if err != nil {
+		return "", fmt.Errorf("not in image (use the gcloud base image)")
+	}
+	cred := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	if cred == "" {
+		return "", fmt.Errorf("no GOOGLE_APPLICATION_CREDENTIALS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if out, err := exec.CommandContext(ctx, gc, "auth", "activate-service-account",
+		"--key-file="+cred).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("auth failed: %s", firstLine(out))
+	}
+	out, err := exec.CommandContext(ctx, gc, "billing", "accounts", "list",
+		"--format=value(displayName,open)").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("billing query failed: %s", firstLine(out))
+	}
+	res := strings.TrimSpace(string(out))
+	if res == "" {
+		res = "(none visible to this key)"
+	}
+	return res, nil
+}
+
+func firstLine(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 160 {
+		s = s[:160]
+	}
+	return s
+}
+
+// manifestDescriptions reads the bootstrap-written manifest (names+descriptions,
+// never values) so the agent knows what each materialized secret is for.
+func manifestDescriptions() []string {
+	dir := os.Getenv("CLAW_SECRETS_DIR")
+	if dir == "" {
+		dir = "/var/run/claw/secrets"
+	}
+	b, err := os.ReadFile(filepath.Join(dir, ".claw-manifest.json"))
+	if err != nil {
+		return nil
+	}
+	var entries []struct {
+		Name, Description, Path string
+	}
+	if json.Unmarshal(b, &entries) != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		out = append(out, e.Description)
+	}
+	return out
+}
+
 
 func postOutput(controllerURL, runID, content string) error {
 	body, _ := json.Marshal(map[string]string{"kind": "text", "content": content})

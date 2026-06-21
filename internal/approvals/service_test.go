@@ -17,6 +17,27 @@ import (
 	"github.com/traego/kube-claw/internal/store/sqlite"
 )
 
+// TestApprove_NotFound: approving a missing request returns ErrNotFound before
+// touching the agent/secret (load() fails fast).
+func TestApprove_NotFound(t *testing.T) {
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "claw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{Store: st}
+	if _, err := svc.Approve(ctx, "missing", "a", "r"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Approve missing = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.ApproveByPrincipal(ctx, "missing", "U", "r"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("ApproveByPrincipal missing = %v, want ErrNotFound", err)
+	}
+}
+
 // Verifies the Slack approval path enforces granter membership, while the
 // break-glass path does not.
 func TestApproveByPrincipal_GranterCheck(t *testing.T) {
@@ -34,7 +55,7 @@ func TestApproveByPrincipal_GranterCheck(t *testing.T) {
 	secSvc := &secrets.Service{Store: st, Cipher: cipher}
 
 	// Secret with granter U_ALEX; one version; a pending request.
-	sec, _ := secSvc.CreateSecret(ctx, "claw-agents", "gcp-billing", "gcp", []string{"U_ALEX"})
+	sec, _ := secSvc.CreateSecret(ctx, "claw-agents", "gcp-billing", "gcp", "", []string{"U_ALEX"})
 	_ = secSvc.PutValue(ctx, "claw-agents", "gcp-billing", []byte("v"), "test")
 	_ = st.Tx(ctx, func(tx store.Tx) error {
 		return tx.CreateSecretRequest(store.SecretRequest{

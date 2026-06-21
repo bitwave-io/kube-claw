@@ -22,6 +22,13 @@ vet:
 test: generate
 	go test ./...
 
+# Integration tests against a real apiserver (kube-apiserver + etcd via envtest).
+# envtest tests skip themselves when KUBEBUILDER_ASSETS is unset.
+.PHONY: test-envtest
+test-envtest: generate manifests
+	KUBEBUILDER_ASSETS="$$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest use -p path)" \
+		go test ./... -count=1
+
 .PHONY: build
 build: generate
 	go build ./...

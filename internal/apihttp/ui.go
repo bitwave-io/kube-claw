@@ -24,12 +24,15 @@ type UIServer struct {
 
 func (s *UIServer) NeedLeaderElection() bool { return false }
 
-func (s *UIServer) Start(ctx context.Context) error {
+func (s *UIServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ui/secret-intake/{token}", s.form)
 	mux.HandleFunc("POST /ui/secret-intake/{token}", s.submit)
+	return mux
+}
 
-	srv := &http.Server{Addr: s.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+func (s *UIServer) Start(ctx context.Context) error {
+	srv := &http.Server{Addr: s.Addr, Handler: s.handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

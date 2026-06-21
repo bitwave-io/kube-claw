@@ -33,6 +33,25 @@ spec:
             - --ui-base-url={{ .Values.controller.uiBaseURL }}
             - --runner-image={{ .Values.controller.runnerImage }}
             - --self-url={{ .Values.controller.selfURL }}
+          {{- if or .Values.slack.routes .Values.slack.enabled }}
+          env:
+            {{- with .Values.slack.routes }}
+            - name: CLAW_SLACK_ROUTES
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- if .Values.slack.enabled }}
+            - name: CLAW_SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.slack.tokenSecretName }}
+                  key: app-token
+            - name: CLAW_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.slack.tokenSecretName }}
+                  key: bot-token
+            {{- end }}
+          {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.service.apiPort }}
