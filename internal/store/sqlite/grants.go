@@ -108,18 +108,37 @@ func (t *tx) CreateSecretRequest(req store.SecretRequest) error {
 	return nil
 }
 
-const reqCols = `id, status, agent_ns, agent_name, run_id, secret_id, secret_name, image_digest, context, created_at`
+const reqCols = `id, status, agent_ns, agent_name, run_id, secret_id, secret_name, image_digest, context, created_at, notified_at`
 
 func scanReq(s interface{ Scan(...any) error }) (store.SecretRequest, error) {
 	var r store.SecretRequest
-	var runID, secretName, digest, ctx sql.NullString
+	var runID, secretName, digest, ctx, notified sql.NullString
 	err := s.Scan(&r.ID, &r.Status, &r.AgentNamespace, &r.AgentName, &runID, &r.SecretID,
-		&secretName, &digest, &ctx, &r.CreatedAt)
+		&secretName, &digest, &ctx, &r.CreatedAt, &notified)
 	if err != nil {
 		return r, err
 	}
 	r.RunID, r.SecretName, r.ImageDigest, r.Context = runID.String, secretName.String, digest.String, ctx.String
+	r.NotifiedAt = notified.String
 	return r, nil
+}
+
+// GetPendingRequest returns the Pending request for an agent+secret, or ErrNotFound.
+func (t *tx) GetPendingRequest(ns, agent, secretID string) (store.SecretRequest, error) {
+	r, err := scanReq(t.tx.QueryRow(
+		`SELECT `+reqCols+` FROM secret_requests
+		 WHERE agent_ns=? AND agent_name=? AND secret_id=? AND status='Pending'
+		 ORDER BY created_at ASC LIMIT 1`, ns, agent, secretID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.SecretRequest{}, store.ErrNotFound
+	}
+	return r, err
+}
+
+// MarkRequestNotified records that the approval was posted to Slack.
+func (t *tx) MarkRequestNotified(id string) error {
+	_, err := t.tx.Exec(`UPDATE secret_requests SET notified_at=? WHERE id=?`, store.NowRFC3339(), id)
+	return err
 }
 
 func (t *tx) GetSecretRequest(id string) (store.SecretRequest, error) {

@@ -5,10 +5,11 @@ metadata:
   namespace: claw-agents
 spec:
   displayName: GCP Cost Monitor
-  # Reference a registered base image (see `claw baseimage` / the /ui/base-images
-  # page). The run engine resolves it to a concrete image at launch. On GKE point
-  # this at the gcloud base; locally it can point at the arm64 stub runner.
-  baseImageRef: gcp-cost-base
+  # Reference a registered base image by capability (see `claw baseimage` / the
+  # /ui/base-images page). "gcloud" is the generic Google Cloud SDK base; an AWS
+  # cost agent would use "aws", an Azure one "azure". The run engine resolves it
+  # to a concrete image at launch.
+  baseImageRef: gcloud
   runtime:
     mode: scaleToZeroSession
     idleTimeout: 15m

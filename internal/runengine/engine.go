@@ -20,6 +20,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
+	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
 	"github.com/traego/kube-claw/internal/workloads"
@@ -30,8 +31,10 @@ type Engine struct {
 	Store         store.Store
 	K8s           client.Client
 	RunnerImage   string
-	ControllerURL string
-	Interval      time.Duration
+	ControllerURL   string
+	Interval        time.Duration
+	Notifier        *slackrouter.Notifier // posts approval requests to Slack (nil if no bot token)
+	AnthropicSecret string                // K8s secret (key "api-key") injected into run pods for the agent loop
 }
 
 func (e *Engine) NeedLeaderElection() bool { return true }
@@ -169,10 +172,33 @@ func (e *Engine) resolveImage(ctx context.Context, agent *clawv1alpha1.Agent) st
 	return e.RunnerImage
 }
 
+// resolvePrompt picks the agent's system prompt: the editable DB prompt wins,
+// falling back to the Agent CRD's seed prompt. Resolved at launch so UI edits
+// take effect on the next run.
+func (e *Engine) resolvePrompt(ctx context.Context, agent *clawv1alpha1.Agent) string {
+	var content string
+	_ = e.Store.Tx(ctx, func(tx store.Tx) error {
+		if p, err := tx.GetPrompt(agent.Namespace, agent.Name); err == nil {
+			content = p.Content
+		}
+		return nil
+	})
+	if content != "" {
+		return content
+	}
+	if agent.Spec.Model != nil {
+		return agent.Spec.Model.SystemPrompt
+	}
+	return ""
+}
+
 // ensureGrantOrRequest reports whether a valid grant exists for the secret; if
-// not, it ensures a Pending SecretRequest (deduped) and returns false.
+// not, it ensures a Pending SecretRequest (deduped) and returns false. When a
+// NEW request is opened and the run came from Slack, it posts approval buttons.
 func (e *Engine) ensureGrantOrRequest(ctx context.Context, run store.Run, ns, agent, secretName, digest, specHash, deliveryHash string) (bool, error) {
 	granted := false
+	var req store.SecretRequest
+	var haveReq bool
 	err := e.Store.Tx(ctx, func(tx store.Tx) error {
 		sec, err := tx.GetSecret(ns, secretName)
 		if errors.Is(err, store.ErrNotFound) {
@@ -187,12 +213,15 @@ func (e *Engine) ensureGrantOrRequest(ctx context.Context, run store.Run, ns, ag
 		} else if !errors.Is(gerr, store.ErrNotFound) {
 			return gerr
 		}
-		// no valid grant → ensure a pending request
-		exists, err := tx.PendingRequestExists(ns, agent, sec.ID)
-		if err != nil || exists {
-			return err
+		// find the existing Pending request, or create one (dedup per agent+secret).
+		existing, gerr := tx.GetPendingRequest(ns, agent, sec.ID)
+		if gerr == nil {
+			req, haveReq = existing, true
+			return nil
+		} else if !errors.Is(gerr, store.ErrNotFound) {
+			return gerr
 		}
-		req := store.SecretRequest{
+		req = store.SecretRequest{
 			ID: secrets.NewID("req"), Status: "Pending",
 			AgentNamespace: ns, AgentName: agent, RunID: run.ID,
 			SecretID: sec.ID, SecretName: secretName, ImageDigest: digest,
@@ -200,16 +229,33 @@ func (e *Engine) ensureGrantOrRequest(ctx context.Context, run store.Run, ns, ag
 		if err := tx.CreateSecretRequest(req); err != nil {
 			return err
 		}
+		haveReq = true
 		return tx.AppendAudit(store.AuditEvent{Type: "secret.requested", SecretID: sec.ID, RunID: run.ID, Actor: "runengine"})
 	})
-	return granted, err
+	if err != nil {
+		return false, err
+	}
+	// #3 (self-healing): post the approval to Slack for any pending request that
+	// hasn't been posted yet, and mark it — so a transient post failure recovers
+	// on a later tick and we never double-post.
+	if !granted && haveReq && req.NotifiedAt == "" && e.Notifier != nil {
+		if ch := slackrouter.SlackChannel(run.Source); ch != "" {
+			if perr := e.Notifier.PostApproval(ctx, ch, run.SessionID, secretName, req.ID); perr != nil {
+				logf.Log.WithName("runengine").Error(perr, "post slack approval", "run", run.ID)
+			} else {
+				_ = e.Store.Tx(ctx, func(tx store.Tx) error { return tx.MarkRequestNotified(req.ID) })
+			}
+		}
+	}
+	return granted, nil
 }
 
 func (e *Engine) launch(ctx context.Context, run store.Run, agent *clawv1alpha1.Agent) {
 	lg := logf.Log.WithName("runengine").WithValues("run", run.ID, "agent", run.AgentName)
 
 	image := e.resolveImage(ctx, agent)
-	job := workloads.BuildRunJob(run, image, e.ControllerURL, inputText(run.Input))
+	prompt := e.resolvePrompt(ctx, agent)
+	job := workloads.BuildRunJob(run, image, e.ControllerURL, inputText(run.Input), prompt, e.AnthropicSecret)
 	if err := e.K8s.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
 		lg.Error(err, "create job")
 		return

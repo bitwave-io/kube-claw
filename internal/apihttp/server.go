@@ -37,12 +37,14 @@ type Server struct {
 	Addr     string
 	Store    store.Store
 	Reader   client.Reader     // uncached k8s reader (mgr.GetAPIReader)
+	K8s      client.Client     // writer, for creating Agent CRs from the API
 	Secrets  *secrets.Service  // secret authority
 	UIBase    string             // base URL of the intake UI (for returned links)
 	Identity  identity.Provider   // /login credential verifier
 	Signer    *identity.Signer    // claw session token signer
-	Approvals *approvals.Service  // shared approval path
-	Router    *slackrouter.Router // connector routing (nil if no routes configured)
+	Approvals *approvals.Service    // shared approval path
+	Router    *slackrouter.Router   // connector routing (nil if no routes configured)
+	Notifier  *slackrouter.Notifier // posts replies/approvals to Slack (nil if no bot token)
 }
 
 // NeedLeaderElection lets the API run on every replica (false = not gated).
@@ -74,6 +76,7 @@ func (s *Server) handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /v1/agents", s.listAgents)
+	mux.HandleFunc("POST /v1/agents", s.createAgent)
 	mux.HandleFunc("POST /v1/runs", s.createRun)
 	mux.HandleFunc("GET /v1/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
@@ -93,6 +96,11 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/base-images", s.baseImagesPage)
 	mux.HandleFunc("POST /ui/base-images", s.baseImagesSubmit)
 	mux.HandleFunc("POST /v1/connectors/slack/events", s.slackEvent)
+	mux.HandleFunc("GET /v1/prompts", s.listPrompts)
+	mux.HandleFunc("PUT /v1/prompts", s.setPrompt)
+	mux.HandleFunc("GET /v1/prompts/{ns}/{name}", s.getPrompt)
+	mux.HandleFunc("GET /ui/prompts", s.promptsPage)
+	mux.HandleFunc("POST /ui/prompts", s.promptsSubmit)
 	return mux
 }
 
@@ -230,10 +238,13 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 	if req.Kind == "" {
 		req.Kind = "text"
 	}
+	var run store.Run
 	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
-		if _, e := tx.GetRun(id); e != nil {
+		got, e := tx.GetRun(id)
+		if e != nil {
 			return e
 		}
+		run = got
 		if e := tx.AppendOutput(id, store.Output{Kind: req.Kind, Content: req.Content}); e != nil {
 			return e
 		}
@@ -249,6 +260,14 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// #2: post the agent's reply back to the originating Slack thread.
+	if s.Notifier != nil {
+		if ch := slackrouter.SlackChannel(run.Source); ch != "" {
+			if e := s.Notifier.PostReply(r.Context(), ch, run.SessionID, req.Content); e != nil {
+				logf.Log.WithName("apihttp").Error(e, "post slack reply", "run", id)
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }

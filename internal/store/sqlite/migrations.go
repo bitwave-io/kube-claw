@@ -74,7 +74,8 @@ var migrations = []string{
 		secret_name  TEXT,
 		image_digest TEXT,
 		context      TEXT,
-		created_at   TEXT NOT NULL
+		created_at   TEXT NOT NULL,
+		notified_at  TEXT
 	);`,
 
 	`CREATE TABLE IF NOT EXISTS runs (
@@ -122,6 +123,13 @@ var migrations = []string{
 		created_at  TEXT NOT NULL,
 		expires_at  TEXT NOT NULL,
 		consumed_at TEXT
+	);`,
+	`CREATE TABLE IF NOT EXISTS prompts (
+		agent_ns   TEXT NOT NULL,
+		agent_name TEXT NOT NULL,
+		content    TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (agent_ns, agent_name)
 	);`,
 
 	`CREATE INDEX IF NOT EXISTS grants_by_agent  ON grants(agent_ns, agent_name);`,

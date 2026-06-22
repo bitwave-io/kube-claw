@@ -12,7 +12,8 @@ metadata:
 rules:
   - apiGroups: ["claw.run"]
     resources: ["agents", "agents/status"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    # create/delete: the API lets you register agents without YAML (claw agent create).
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

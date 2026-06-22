@@ -35,7 +35,26 @@ if [[ "$yn" =~ ^[Yy] ]]; then
       --dry-run=client -o yaml | kubectl apply -f -
     slack_args=(--set slack.enabled=true)
     echo "  stored tokens in Secret claw-slack-tokens"
+
+    read -rp "  Channel ID to monitor (e.g. C0123ABC, blank to configure later): " ch
+    if [[ -n "$ch" ]]; then
+      read -rp "  Agent to handle it [gcp-cost]: " ag; ag="${ag:-gcp-cost}"
+      read -rp "  Only respond to @mentions? [Y/n]: " m
+      ment=true; [[ "$m" =~ ^[Nn] ]] && ment=false
+      routes="[{\"channels\":[\"$ch\"],\"mentionRequired\":$ment,\"agentNamespace\":\"$AGENTS_NS\",\"agentName\":\"$ag\"}]"
+      slack_args+=(--set-json "slack.routes=$routes")
+      echo "  routing $ch → $ag (mentionRequired=$ment)"
+    fi
   fi
+fi
+
+# Anthropic API key powers the agent loop. Injected into every run pod, so it
+# lives in the AGENTS namespace (where run pods read it), keyed "api-key".
+read -rsp "Anthropic API key for the agent loop (sk-ant-..., blank to skip): " anth; echo
+if [[ -n "$anth" ]]; then
+  kubectl -n "$AGENTS_NS" create secret generic claw-anthropic-key \
+    --from-literal=api-key="$anth" --dry-run=client -o yaml | kubectl apply -f -
+  echo "  stored Anthropic key in Secret claw-anthropic-key (namespace $AGENTS_NS)"
 fi
 
 helm upgrade --install claw "$ROOT/charts/claw" -n "$NS" \

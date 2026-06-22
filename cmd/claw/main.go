@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -31,7 +32,7 @@ func newRootCmd() *cobra.Command {
 		def = "http://localhost:8443"
 	}
 	root.PersistentFlags().StringVar(&controllerURL, "controller-url", def, "controller API base URL")
-	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd(), newAgentsCmd(), newBaseImageCmd())
+	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd(), newAgentsCmd(), newBaseImageCmd(), newPromptCmd())
 	return root
 }
 
@@ -198,10 +199,63 @@ func newBaseImageCmd() *cobra.Command {
 }
 
 func newAgentsCmd() *cobra.Command {
-	c := &cobra.Command{Use: "agents", Short: "Inspect agents"}
+	c := &cobra.Command{Use: "agents", Aliases: []string{"agent"}, Short: "Manage agents"}
 	c.AddCommand(&cobra.Command{Use: "list", Short: "List agents", RunE: func(_ *cobra.Command, _ []string) error {
 		return apiPrint(http.MethodGet, "/v1/agents")
 	}})
+
+	var ns, base, image, prompt, idle string
+	var secretSpecs []string
+	create := &cobra.Command{
+		Use:   "create NAME",
+		Short: "Register an agent (no YAML; the controller creates the Agent CRD)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			secrets := make([]map[string]string, 0, len(secretSpecs))
+			for _, s := range secretSpecs {
+				// format: name[:path[:ENVVAR]]
+				p := strings.SplitN(s, ":", 3)
+				m := map[string]string{"name": p[0]}
+				if len(p) > 1 {
+					m["path"] = p[1]
+				}
+				if len(p) > 2 {
+					m["env"] = p[2]
+				}
+				secrets = append(secrets, m)
+			}
+			return apiJSON(http.MethodPost, "/v1/agents", map[string]any{
+				"namespace": ns, "name": args[0], "baseImageRef": base, "image": image,
+				"systemPrompt": prompt, "idleTimeout": idle, "secrets": secrets,
+			}, nil)
+		},
+	}
+	create.Flags().StringVar(&ns, "namespace", "claw-agents", "namespace")
+	create.Flags().StringVar(&base, "base", "", "base image ref (registered base image name)")
+	create.Flags().StringVar(&image, "image", "", "explicit digest-pinned image (alternative to --base)")
+	create.Flags().StringVar(&prompt, "system-prompt", "", "agent system prompt")
+	create.Flags().StringVar(&idle, "idle-timeout", "15m", "scale-to-zero idle timeout")
+	create.Flags().StringArrayVar(&secretSpecs, "secret", nil, "secret as name:path:ENVVAR (repeatable)")
+	c.AddCommand(create)
+	return c
+}
+
+func newPromptCmd() *cobra.Command {
+	c := &cobra.Command{Use: "prompt", Short: "Manage editable agent system prompts"}
+	c.AddCommand(&cobra.Command{Use: "list", Short: "List prompts", RunE: func(_ *cobra.Command, _ []string) error {
+		return apiPrint(http.MethodGet, "/v1/prompts")
+	}})
+	c.AddCommand(&cobra.Command{Use: "get NAMESPACE NAME", Args: cobra.ExactArgs(2), Short: "Get an agent's prompt",
+		RunE: func(_ *cobra.Command, a []string) error {
+			return apiPrint(http.MethodGet, "/v1/prompts/"+a[0]+"/"+a[1])
+		}})
+	var ns string
+	set := &cobra.Command{Use: "set NAME CONTENT", Args: cobra.ExactArgs(2), Short: "Set an agent's prompt",
+		RunE: func(_ *cobra.Command, a []string) error {
+			return apiJSON(http.MethodPut, "/v1/prompts", map[string]any{"namespace": ns, "name": a[0], "content": a[1]}, nil)
+		}}
+	set.Flags().StringVar(&ns, "namespace", "claw-agents", "namespace")
+	c.AddCommand(set)
 	return c
 }
 

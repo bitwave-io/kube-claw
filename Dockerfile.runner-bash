@@ -1,0 +1,21 @@
+# Local-testing runner with bash + CA certs (the distroless default has neither),
+# so the Claude agent loop can run on a local arm64 k3d cluster. Production uses
+# the gcloud/aws/azure base images, which also carry bash. Not for prod.
+FROM golang:1.26 AS build
+WORKDIR /src
+ENV GOTOOLCHAIN=local
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG TARGETOS=linux
+ARG TARGETARCH=arm64
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/claw-runner ./cmd/claw-runner && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/claw-bootstrap ./cmd/claw-bootstrap
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates bash curl && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/claw-runner /claw/runner
+COPY --from=build /out/claw-bootstrap /claw/bootstrap
+RUN useradd -u 65532 -m -d /home/nonroot nonroot
+USER 65532:65532
+ENTRYPOINT ["/claw/bootstrap", "/claw/runner"]

@@ -5,3 +5,10 @@
 *.db-shm
 cover.out
 
+
+# local-test image build workarounds (reference gitignored /bin binaries)
+Dockerfile.*-prebuilt
+# never commit real tokens/keys for Slack/Anthropic deploys
+*.secrets.env
+.secrets.env
+secrets.env

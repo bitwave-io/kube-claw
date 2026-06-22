@@ -73,6 +73,16 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 		if e.BotID != "" {
 			return // ignore bot messages (incl. our own)
 		}
+		// A DM to the bot is a command (e.g. "register secret ..."), not a run.
+		if e.ChannelType == "im" {
+			reply := r.HandleDM(ctx, e.User, e.Text)
+			if reply != "" && r.Notifier != nil {
+				if perr := r.Notifier.PostReply(ctx, e.Channel, "", reply); perr != nil {
+					lg.Error(perr, "post DM reply")
+				}
+			}
+			return
+		}
 		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), e.Text, false)
 		if err != nil {
 			lg.Error(err, "handle message")

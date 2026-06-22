@@ -40,7 +40,7 @@ func init() {
 }
 
 func main() {
-	var dataDir, probeAddr, apiAddr, uiAddr, uiBaseURL, runnerImage, selfURL string
+	var dataDir, probeAddr, apiAddr, uiAddr, uiBaseURL, runnerImage, selfURL, anthropicSecret string
 	var enableRouter bool
 	flag.StringVar(&dataDir, "data-dir", "/var/lib/claw", "directory for the SQLite store")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe bind address")
@@ -49,6 +49,7 @@ func main() {
 	flag.StringVar(&uiBaseURL, "ui-base-url", "http://localhost:8090", "public base URL of the intake UI (for returned links)")
 	flag.StringVar(&runnerImage, "runner-image", "claw-runner:dev", "image used for agent run Jobs")
 	flag.StringVar(&selfURL, "self-url", "http://claw-controller.claw-system.svc:8443", "in-cluster URL run pods use to reach the controller")
+	flag.StringVar(&anthropicSecret, "anthropic-secret", "claw-anthropic-key", "K8s secret (key \"api-key\") injected into run pods for the agent loop")
 	flag.BoolVar(&enableRouter, "enable-router", true, "run the embedded Slack router")
 	flag.Parse()
 
@@ -109,10 +110,20 @@ func main() {
 	// Slack connector router (channel→agent routing + run creation). Built when
 	// routes are configured; usable via the fake event endpoint regardless of
 	// tokens. The Socket Mode transport is added separately when tokens exist.
+	// Notifier posts replies + approval buttons back to Slack (needs the bot token).
+	var slackNotifier *slackrouter.Notifier
+	if bot := os.Getenv("CLAW_SLACK_BOT_TOKEN"); bot != "" {
+		slackNotifier = slackrouter.NewNotifier(bot)
+	}
+	// Router handles channel routing, DM secret registration, and approvals. Built
+	// when routes are configured OR a bot token is present (DMs work without routes).
 	var slackRt *slackrouter.Router
-	if routes := parseSlackRoutes(os.Getenv("CLAW_SLACK_ROUTES")); len(routes) > 0 {
-		slackRt = &slackrouter.Router{Config: slackrouter.Config{Routes: routes}, Store: st, Approvals: approvalSvc}
-		log.Info("slack routes configured", "count", len(routes))
+	if routes := parseSlackRoutes(os.Getenv("CLAW_SLACK_ROUTES")); len(routes) > 0 || slackNotifier != nil {
+		slackRt = &slackrouter.Router{
+			Config: slackrouter.Config{Routes: routes}, Store: st, Approvals: approvalSvc,
+			Secrets: secSvc, Notifier: slackNotifier, UIBase: uiBaseURL,
+		}
+		log.Info("slack router configured", "routes", len(routes))
 	}
 
 	// HTTP API (uncached reader so /v1/agents works without waiting on caches).
@@ -120,12 +131,14 @@ func main() {
 		Addr:      apiAddr,
 		Store:     st,
 		Reader:    mgr.GetAPIReader(),
+		K8s:       mgr.GetClient(),
 		Secrets:   secSvc,
 		UIBase:    uiBaseURL,
 		Identity:  idProvider,
 		Signer:    signer,
 		Approvals: approvalSvc,
 		Router:    slackRt,
+		Notifier:  slackNotifier,
 	}); err != nil {
 		log.Error(err, "unable to add HTTP API server")
 		os.Exit(1)
@@ -157,8 +170,10 @@ func main() {
 		Store:         st,
 		K8s:           mgr.GetClient(),
 		RunnerImage:   runnerImage,
-		ControllerURL: selfURL,
-		Interval:      2 * time.Second,
+		ControllerURL:   selfURL,
+		Interval:        2 * time.Second,
+		Notifier:        slackNotifier,
+		AnthropicSecret: anthropicSecret,
 	}); err != nil {
 		log.Error(err, "unable to add run engine")
 		os.Exit(1)

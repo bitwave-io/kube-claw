@@ -105,8 +105,12 @@ type Tx interface {
 	// PendingRequestExists reports whether a Pending request already exists for
 	// this agent+secret (dedupe).
 	PendingRequestExists(ns, agent, secretID string) (bool, error)
+	// GetPendingRequest returns the Pending request for an agent+secret, or ErrNotFound.
+	GetPendingRequest(ns, agent, secretID string) (SecretRequest, error)
 	// SetSecretRequestStatus updates a request's status.
 	SetSecretRequestStatus(id, status string) error
+	// MarkRequestNotified records that the approval was posted to Slack.
+	MarkRequestNotified(id string) error
 
 	// SeenEvent records a connector event id and reports whether it was already
 	// seen (dedupe). Returns true if this is a DUPLICATE (DESIGN.md §12).
@@ -120,6 +124,25 @@ type Tx interface {
 	GetBaseImage(name string) (BaseImage, error)
 	// ListBaseImages returns all registered base images.
 	ListBaseImages() ([]BaseImage, error)
+
+	// --- agent prompts (editable system prompts) ---
+
+	// SetPrompt creates or replaces an agent's system prompt.
+	SetPrompt(p Prompt) error
+	// GetPrompt returns an agent's prompt, or ErrNotFound.
+	GetPrompt(ns, name string) (Prompt, error)
+	// ListPrompts returns all stored prompts.
+	ListPrompts() ([]Prompt, error)
+}
+
+// Prompt is an editable system prompt for an agent (DESIGN.md §agent-loop). It
+// seeds from the Agent CRD's model.systemPrompt and is editable via API/UI; the
+// run engine resolves the current prompt at launch.
+type Prompt struct {
+	AgentNamespace string
+	AgentName      string
+	Content        string
+	UpdatedAt      string
 }
 
 // AuditEvent is one append-only audit record (DESIGN.md §21).
@@ -208,6 +231,7 @@ type SecretRequest struct {
 	ImageDigest    string `json:"imageDigest"`
 	Context        string `json:"context,omitempty"`
 	CreatedAt      string `json:"createdAt"`
+	NotifiedAt     string `json:"notifiedAt,omitempty"` // when the approval was posted to Slack (empty = not yet)
 }
 
 // BaseImage is a registered, reusable agent runtime image (DESIGN.md §23). The

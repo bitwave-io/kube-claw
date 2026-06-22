@@ -28,7 +28,22 @@ func main() {
 		os.Exit(2)
 	}
 
-	response := respond(input)
+	// Real agent loop when an Anthropic key is present; otherwise the stub so
+	// local/no-key runs still prove the materialize→respond path.
+	var response string
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ans, err := runAgent(ctx, os.Getenv("CLAW_SYSTEM_PROMPT"), input)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claw-runner: agent loop failed: %v\n", err)
+			response = "Agent error: " + err.Error()
+		} else {
+			response = ans
+		}
+	} else {
+		response = respond(input)
+	}
 	fmt.Printf("claw-runner: run=%s input=%q -> %q\n", runID, input, response)
 
 	if err := postOutput(controllerURL, runID, response); err != nil {
@@ -64,45 +79,80 @@ func respond(input string) string {
 		}
 	}
 
-	// Real GCP billing query, using the materialized credential. Works on a
-	// gcloud-equipped base image with a real key; otherwise reports why not.
-	if res, err := gcloudCostQuery(); err == nil {
-		parts = append(parts, "GCP billing accounts: "+res)
+	// Real cloud query using the materialized credential. The base image
+	// determines which CLI is present (gcloud / aws / az); otherwise reports why not.
+	if provider, res, err := cloudQuery(); err == nil {
+		parts = append(parts, provider+": "+res)
 	} else {
-		parts = append(parts, "gcloud: "+err.Error())
+		parts = append(parts, "cloud: "+err.Error())
 	}
 
 	return strings.Join(parts, " | ")
 }
 
-// gcloudCostQuery authenticates with the materialized service-account key and
-// runs a read-only billing query — the real agent action.
-func gcloudCostQuery() (string, error) {
-	gc, err := exec.LookPath("gcloud")
-	if err != nil {
-		return "", fmt.Errorf("not in image (use the gcloud base image)")
+// cloudQuery dispatches to whichever cloud CLI the base image provides and runs
+// a read-only check using the materialized credential — the real agent action.
+func cloudQuery() (provider, result string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	switch {
+	case haveCLI("gcloud"):
+		r, e := gcloudQuery(ctx)
+		return "gcp billing accounts", r, e
+	case haveCLI("aws"):
+		r, e := awsQuery(ctx)
+		return "aws identity", r, e
+	case haveCLI("az"):
+		r, e := azQuery(ctx)
+		return "azure account", r, e
+	default:
+		return "", "", fmt.Errorf("no cloud CLI in image (use a gcloud/aws/azure base)")
 	}
+}
+
+func haveCLI(name string) bool { _, err := exec.LookPath(name); return err == nil }
+
+func gcloudQuery(ctx context.Context) (string, error) {
 	cred := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
 	if cred == "" {
 		return "", fmt.Errorf("no GOOGLE_APPLICATION_CREDENTIALS")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	if out, err := exec.CommandContext(ctx, gc, "auth", "activate-service-account",
-		"--key-file="+cred).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "gcloud", "auth", "activate-service-account", "--key-file="+cred).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("auth failed: %s", firstLine(out))
 	}
-	out, err := exec.CommandContext(ctx, gc, "billing", "accounts", "list",
-		"--format=value(displayName,open)").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "gcloud", "billing", "accounts", "list", "--format=value(displayName,open)").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("billing query failed: %s", firstLine(out))
 	}
-	res := strings.TrimSpace(string(out))
-	if res == "" {
-		res = "(none visible to this key)"
+	return nonEmpty(out), nil
+}
+
+func awsQuery(ctx context.Context) (string, error) {
+	// AWS picks up creds from env (AWS_ACCESS_KEY_ID/...) or a shared file the
+	// secret delivery mounted. sts get-caller-identity is a safe read.
+	out, err := exec.CommandContext(ctx, "aws", "sts", "get-caller-identity", "--output", "text").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("sts failed: %s", firstLine(out))
 	}
-	return res, nil
+	return nonEmpty(out), nil
+}
+
+func azQuery(ctx context.Context) (string, error) {
+	// Azure auth (service principal) is set up by the runner/secret in a real
+	// deployment; here we report the signed-in account if available.
+	out, err := exec.CommandContext(ctx, "az", "account", "show", "--query", "name", "-o", "tsv").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("account show failed: %s", firstLine(out))
+	}
+	return nonEmpty(out), nil
+}
+
+func nonEmpty(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
 
 func firstLine(b []byte) string {

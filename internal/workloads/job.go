@@ -22,7 +22,32 @@ func RunJobName(run store.Run) string { return run.ID }
 
 // BuildRunJob builds the one-shot Job for a run. It runs as the agent's
 // ServiceAccount (claw-agent-<name>) with a locked-down pod security context.
-func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText string) *batchv1.Job {
+func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText, systemPrompt, anthropicSecret string) *batchv1.Job {
+	env := []corev1.EnvVar{
+		{Name: "CLAW_RUN_ID", Value: run.ID},
+		{Name: "CLAW_AGENT_NAME", Value: run.AgentName},
+		{Name: "CLAW_AGENT_NAMESPACE", Value: run.AgentNamespace},
+		{Name: "CLAW_CONTROLLER_URL", Value: controllerURL},
+		{Name: "CLAW_INPUT", Value: inputText},
+		{Name: "CLAW_SYSTEM_PROMPT", Value: systemPrompt},
+		{Name: "CLAW_SECRETS_DIR", Value: "/var/run/claw/secrets"},
+		{Name: "CLAW_SA_TOKEN_FILE", Value: "/var/run/claw/sa-token/token"},
+		{Name: "HOME", Value: "/workspace"},
+	}
+	// Anthropic key is platform infrastructure injected into every run pod (not a
+	// PAM secret). Optional so the Job still runs where the key isn't installed.
+	if anthropicSecret != "" {
+		env = append(env, corev1.EnvVar{Name: "ANTHROPIC_API_KEY", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: anthropicSecret},
+				Key:                  "api-key", Optional: ptr(true),
+			},
+		}})
+	}
+	return buildJob(run, runnerImage, env)
+}
+
+func buildJob(run store.Run, runnerImage string, env []corev1.EnvVar) *batchv1.Job {
 	backoff := int32(1)
 	ttl := int32(600)
 	deadline := int64(120)
@@ -55,15 +80,7 @@ func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText string) *b
 						Image: runnerImage,
 						// bootstrap performs /login + materialize, then execs the runner.
 						Command: []string{"/claw/bootstrap", "/claw/runner"},
-						Env: []corev1.EnvVar{
-							{Name: "CLAW_RUN_ID", Value: run.ID},
-							{Name: "CLAW_AGENT_NAME", Value: run.AgentName},
-							{Name: "CLAW_AGENT_NAMESPACE", Value: run.AgentNamespace},
-							{Name: "CLAW_CONTROLLER_URL", Value: controllerURL},
-							{Name: "CLAW_INPUT", Value: inputText},
-							{Name: "CLAW_SECRETS_DIR", Value: "/var/run/claw/secrets"},
-							{Name: "CLAW_SA_TOKEN_FILE", Value: "/var/run/claw/sa-token/token"},
-						},
+						Env:     env,
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: ptr(false),
 							ReadOnlyRootFilesystem:   ptr(true),
@@ -82,12 +99,16 @@ func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText string) *b
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "claw-secrets", MountPath: "/var/run/claw/secrets"},
 							{Name: "sa-token", MountPath: "/var/run/claw/sa-token", ReadOnly: true},
+							{Name: "workspace", MountPath: "/workspace"},
+							{Name: "tmp", MountPath: "/tmp"},
 						},
 					}},
 					Volumes: []corev1.Volume{
 						{Name: "claw-secrets", VolumeSource: corev1.VolumeSource{
 							EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory},
 						}},
+						{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 						{Name: "sa-token", VolumeSource: corev1.VolumeSource{
 							Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{
 								ServiceAccountToken: &corev1.ServiceAccountTokenProjection{

@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/traego/kube-claw/internal/approvals"
+	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
 )
 
@@ -53,6 +54,51 @@ type Router struct {
 	Config    Config
 	Store     store.Store
 	Approvals *approvals.Service
+	Secrets   *secrets.Service // for DM-based secret registration
+	Notifier  *Notifier        // for DM replies
+	UIBase    string           // intake link base URL
+}
+
+// HandleDM handles a direct message to the bot. Today it supports secret
+// registration: "register secret <name> [description]" mints a one-time intake
+// link with the DMing user as the secret's granter. Returns the reply text.
+func (r *Router) HandleDM(ctx context.Context, userID, text string) string {
+	low := strings.ToLower(text)
+	if !strings.Contains(low, "register") || !strings.Contains(low, "secret") {
+		return "Hi! DM me `register secret <name> [description]` and I'll send a one-time link to add the value — you'll be set as its approver."
+	}
+	if r.Secrets == nil {
+		return "secret registration isn't configured on this controller"
+	}
+	name, desc := parseRegisterSecret(text)
+	if name == "" {
+		return "What should the secret be called? DM me `register secret <name> [description]`."
+	}
+	const ns = "claw-agents"
+	// Create (ignore already-exists) with the DMing user as granter, then mint a link.
+	_, _ = r.Secrets.CreateSecret(ctx, ns, name, "", desc, []string{userID})
+	tok, err := r.Secrets.MintIntakeToken(ctx, ns, name)
+	if err != nil {
+		return "couldn't create the intake link: " + err.Error()
+	}
+	return fmt.Sprintf("Open this one-time link to add the value for *%s* (you, <@%s>, are the approver):\n%s/ui/secret-intake/%s",
+		name, userID, r.UIBase, tok)
+}
+
+// parseRegisterSecret pulls the name (and optional description) following the
+// word "secret" in a DM like "register secret gcp-billing read-only key".
+func parseRegisterSecret(text string) (name, description string) {
+	fields := strings.Fields(text)
+	for i, f := range fields {
+		if strings.EqualFold(f, "secret") && i+1 < len(fields) {
+			name = fields[i+1]
+			if i+2 < len(fields) {
+				description = strings.Join(fields[i+2:], " ")
+			}
+			return name, description
+		}
+	}
+	return "", ""
 }
 
 // HandleMessage dedupes a Slack event and, if it matches a route, creates a run.
