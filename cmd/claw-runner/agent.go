@@ -48,6 +48,7 @@ func newAgentSession(systemPrompt string) *agentSession {
 	}
 	notes = append(notes,
 		"If a task needs a credential you don't have (a cloud key, an API token), DON'T give up — call the `request_secret` tool. It DMs the user a secure link to provide it, then writes it to a file in this container so you can use it.",
+		"IMPORTANT: if you already requested a secret and the user now says they've added it / asks you to check, call `request_secret` AGAIN with the same name — that installs the value. Do NOT use bash to look for it; the value is only pulled into the container by request_secret.",
 		"Prefer read-only commands. Answer the user's question concisely, then stop. This is a chat thread — you may be asked follow-up questions.")
 	sys = sys + "\n\n" + strings.Join(notes, "\n")
 
@@ -63,10 +64,11 @@ func newAgentSession(systemPrompt string) *agentSession {
 	}
 	reqSecretTool := anthropic.ToolParam{
 		Name: "request_secret",
-		Description: anthropic.String("Request a credential you need but don't have (e.g. a cloud service-account key). " +
-			"This DMs the user a one-time secure link to provide it; once they do, it's written to a file in this " +
-			"container and that path is returned (and $GOOGLE_APPLICATION_CREDENTIALS is set for GCP keys). " +
-			"Call this when a task needs credentials that aren't already present, then retry."),
+		Description: anthropic.String("Request AND retrieve a credential. First call: DMs the user a one-time link to " +
+			"provide the secret. Call it AGAIN with the same name to install a secret the user has since provided — " +
+			"the value is written to a file in this container, the env var is set, and the path is returned. " +
+			"This tool is the ONLY way to get the value into the container: when the user says they've added a secret, " +
+			"call this again — do NOT just inspect the filesystem with bash (the value won't be there until you call this)."),
 		InputSchema: anthropic.ToolInputSchemaParam{
 			Properties: map[string]any{
 				"name":        map[string]any{"type": "string", "description": "short secret name, e.g. gcp-billing-readonly"},
@@ -161,44 +163,52 @@ func (s *agentSession) requestSecret(ctx context.Context, name, description, env
 	if s.controllerURL == "" || s.runID == "" || s.token == "" {
 		return "request_secret is unavailable in this run (no controller binding)."
 	}
-	// 1. ask the controller to create the secret + DM the user a link.
+	// Retrieve-first: if the user has already provided this secret, install it
+	// immediately — no new DM, no waiting. (Makes re-calling to "fetch" idempotent.)
+	if path, content, ok := s.fetchRequested(ctx, name); ok {
+		return s.install(ctx, name, path, content, envVar)
+	}
+	// Otherwise ask the controller to create the secret + DM the user a link.
 	body, _ := json.Marshal(map[string]string{"name": name, "description": description})
 	if err := s.post(ctx, fmt.Sprintf("/v1/runs/%s/request-secret", s.runID), body); err != nil {
 		return "Couldn't request the secret: " + err.Error()
 	}
-	// 2. poll until the user provides the value (or we time out).
-	deadline := time.Now().Add(3 * time.Minute)
+	// Poll for a short window in case they provide it right away.
+	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
-		path, content, ok := s.fetchRequested(ctx, name)
-		if ok {
-			if err := os.MkdirAll("/var/run/claw/secrets", 0o700); err == nil {
-				if werr := os.WriteFile(path, content, 0o400); werr == nil {
-					extra := ""
-					// Expose it however the agent asked — generic, not GCP-only.
-					if envVar != "" {
-						_ = os.Setenv(envVar, path)
-						extra = fmt.Sprintf(" $%s points to it.", envVar)
-					}
-					// GCP keys: the gcloud CLI ignores GOOGLE_APPLICATION_CREDENTIALS,
-					// so also activate the service account for it.
-					if envVar == "GOOGLE_APPLICATION_CREDENTIALS" && haveCLI("gcloud") {
-						actx, cancel := context.WithTimeout(ctx, 60*time.Second)
-						out, aerr := exec.CommandContext(actx, "gcloud", "auth", "activate-service-account", "--key-file="+path).CombinedOutput()
-						cancel()
-						if aerr == nil {
-							extra += " I've also activated it for the gcloud CLI."
-						} else {
-							extra += " (gcloud activate-service-account said: " + firstLine(out) + ")"
-						}
-					}
-					return fmt.Sprintf("Got it — *%s* is now available at %s.%s Retry your task now.", name, path, extra)
-				}
-			}
-			return "Received the secret but failed to write it to disk."
+		if path, content, ok := s.fetchRequested(ctx, name); ok {
+			return s.install(ctx, name, path, content, envVar)
 		}
 		time.Sleep(5 * time.Second)
 	}
-	return fmt.Sprintf("I've DM'd the user a one-time link to add *%s*. They haven't provided it yet — tell them to check their DMs, then ask me again.", name)
+	return fmt.Sprintf("I've DM'd the user a one-time link to add *%s*. When they say they've added it, call request_secret again with name=%q (do NOT check the filesystem — only this tool installs the value).", name, name)
+}
+
+// install writes a fetched secret into the pod and wires it up for the request's
+// tooling (generic env var; gcloud activation only for a GCP key).
+func (s *agentSession) install(ctx context.Context, name, path string, content []byte, envVar string) string {
+	if err := os.MkdirAll("/var/run/claw/secrets", 0o700); err != nil {
+		return "Received the secret but couldn't prepare the secrets dir: " + err.Error()
+	}
+	if err := os.WriteFile(path, content, 0o400); err != nil {
+		return "Received the secret but failed to write it to disk: " + err.Error()
+	}
+	extra := ""
+	if envVar != "" {
+		_ = os.Setenv(envVar, path)
+		extra = fmt.Sprintf(" $%s points to it.", envVar)
+	}
+	if envVar == "GOOGLE_APPLICATION_CREDENTIALS" && haveCLI("gcloud") {
+		actx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		out, aerr := exec.CommandContext(actx, "gcloud", "auth", "activate-service-account", "--key-file="+path).CombinedOutput()
+		cancel()
+		if aerr == nil {
+			extra += " I've also activated it for the gcloud CLI."
+		} else {
+			extra += " (gcloud activate-service-account said: " + firstLine(out) + ")"
+		}
+	}
+	return fmt.Sprintf("Got it — *%s* is now installed at %s.%s Retry your task now.", name, path, extra)
 }
 
 func (s *agentSession) post(ctx context.Context, path string, body []byte) error {
