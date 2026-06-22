@@ -50,6 +50,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.slack.tokenSecretName }}
                   key: bot-token
+            # Anthropic key powers the LLM image router (classifies requests →
+            # picks the best base image). Optional; routing is skipped if absent.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: claw-anthropic-key
+                  key: api-key
+                  optional: true
             {{- end }}
           {{- end }}
           ports:

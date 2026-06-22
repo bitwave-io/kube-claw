@@ -125,6 +125,12 @@ func main() {
 			Secrets: secSvc, Notifier: slackNotifier, UIBase: uiBaseURL,
 			DefaultAgent: defaultAgent, AgentsNS: "claw-agents",
 		}
+		// LLM image router: when the controller has an Anthropic key, it classifies
+		// each new request against the base-image registry and picks the best image.
+		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+			slackRt.Classifier = slackrouter.NewClassifier(key)
+			log.Info("slack image router enabled (llm classification)")
+		}
 		log.Info("slack router configured", "routes", len(routes), "defaultAgent", defaultAgent)
 	}
 

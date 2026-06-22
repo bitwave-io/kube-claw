@@ -29,9 +29,11 @@ kubectl -n "$NS" create secret generic claw-slack-tokens \
   --dry-run=client -o yaml | kubectl apply -f -
 
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "Creating Anthropic key Secret in $AGENTS_NS..."
-  kubectl -n "$AGENTS_NS" create secret generic claw-anthropic-key \
-    --from-literal=api-key="$ANTHROPIC_API_KEY" --dry-run=client -o yaml | kubectl apply -f -
+  echo "Creating Anthropic key Secret in $AGENTS_NS (run pods) and $NS (router)..."
+  for n in "$AGENTS_NS" "$NS"; do
+    kubectl -n "$n" create secret generic claw-anthropic-key \
+      --from-literal=api-key="$ANTHROPIC_API_KEY" --dry-run=client -o yaml | kubectl apply -f -
+  done
 fi
 
 echo "helm upgrade..."

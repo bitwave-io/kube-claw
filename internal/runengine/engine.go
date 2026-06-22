@@ -174,13 +174,18 @@ func (e *Engine) sessionPodActive(ctx context.Context, ns, sessionID string) boo
 	return false
 }
 
-// resolveImage picks the image for a run's Job: a registered base image
-// (baseImageRef) wins, then the agent's inline image, then the global fallback.
-func (e *Engine) resolveImage(ctx context.Context, agent *clawv1alpha1.Agent) string {
-	if agent.Spec.BaseImageRef != "" {
+// resolveImage picks the image for a run's Job: the router's per-request pick
+// (stored on the run) wins, then the agent's baseImageRef, then its inline
+// image, then the global fallback.
+func (e *Engine) resolveImage(ctx context.Context, run store.Run, agent *clawv1alpha1.Agent) string {
+	ref := agent.Spec.BaseImageRef
+	if picked := pickedImage(run.Source); picked != "" {
+		ref = picked // LLM router chose this image for this request
+	}
+	if ref != "" {
 		var img string
 		_ = e.Store.Tx(ctx, func(tx store.Tx) error {
-			if b, err := tx.GetBaseImage(agent.Spec.BaseImageRef); err == nil {
+			if b, err := tx.GetBaseImage(ref); err == nil {
 				img = b.Image
 			}
 			return nil
@@ -193,6 +198,15 @@ func (e *Engine) resolveImage(ctx context.Context, agent *clawv1alpha1.Agent) st
 		return agent.Spec.Image
 	}
 	return e.RunnerImage
+}
+
+// pickedImage reads the router's chosen base-image ref from a run's Source JSON.
+func pickedImage(source string) string {
+	var s struct {
+		Image string `json:"image"`
+	}
+	_ = json.Unmarshal([]byte(source), &s)
+	return s.Image
 }
 
 // resolvePrompt picks the agent's system prompt: the editable DB prompt wins,
@@ -276,7 +290,7 @@ func (e *Engine) ensureGrantOrRequest(ctx context.Context, run store.Run, ns, ag
 func (e *Engine) launch(ctx context.Context, run store.Run, agent *clawv1alpha1.Agent) {
 	lg := logf.Log.WithName("runengine").WithValues("run", run.ID, "agent", run.AgentName)
 
-	image := e.resolveImage(ctx, agent)
+	image := e.resolveImage(ctx, run, agent)
 	prompt := e.resolvePrompt(ctx, agent)
 	idle := agent.Spec.Runtime.IdleTimeout
 	if idle == "" {

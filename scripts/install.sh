@@ -44,9 +44,12 @@ fi
 # lives in the AGENTS namespace (where run pods read it), keyed "api-key".
 read -rsp "Anthropic API key for the agent loop (sk-ant-..., blank to skip): " anth; echo
 if [[ -n "$anth" ]]; then
-  kubectl -n "$AGENTS_NS" create secret generic claw-anthropic-key \
-    --from-literal=api-key="$anth" --dry-run=client -o yaml | kubectl apply -f -
-  echo "  stored Anthropic key in Secret claw-anthropic-key (namespace $AGENTS_NS)"
+  # agents ns = run pods (agent loop); controller ns = the LLM image router.
+  for n in "$AGENTS_NS" "$NS"; do
+    kubectl -n "$n" create secret generic claw-anthropic-key \
+      --from-literal=api-key="$anth" --dry-run=client -o yaml | kubectl apply -f -
+  done
+  echo "  stored Anthropic key in Secret claw-anthropic-key (namespaces $AGENTS_NS, $NS)"
 fi
 
 helm upgrade --install claw "$ROOT/charts/claw" -n "$NS" \
