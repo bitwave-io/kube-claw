@@ -96,6 +96,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/base-images", s.baseImagesPage)
 	mux.HandleFunc("POST /ui/base-images", s.baseImagesSubmit)
 	mux.HandleFunc("POST /v1/connectors/slack/events", s.slackEvent)
+	mux.HandleFunc("POST /v1/runs/{id}/request-secret", s.requestSecret)
+	mux.HandleFunc("GET /v1/runs/{id}/requested-secret", s.requestedSecret)
 	mux.HandleFunc("POST /v1/sessions/{id}/claim-next", s.claimNextTurn)
 	mux.HandleFunc("POST /v1/sessions/{id}/sleep", s.sessionSleep)
 	mux.HandleFunc("GET /v1/prompts", s.listPrompts)
@@ -375,6 +377,7 @@ type slackEventReq struct {
 	SessionID string `json:"sessionId"`
 	Text      string `json:"text"`
 	Mentioned bool   `json:"mentioned"`
+	User      string `json:"user"`
 }
 
 func (s *Server) slackEvent(w http.ResponseWriter, r *http.Request) {
@@ -387,7 +390,7 @@ func (s *Server) slackEvent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "eventId and channel are required")
 		return
 	}
-	runID, err := s.Router.HandleMessage(r.Context(), req.EventID, req.Channel, req.SessionID, req.Text, req.Mentioned)
+	runID, err := s.Router.HandleMessage(r.Context(), req.EventID, req.Channel, req.SessionID, req.Text, req.Mentioned, req.User)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

@@ -191,7 +191,7 @@ func parseRegisterSecret(text string) (name, description string) {
 
 // HandleMessage dedupes a Slack event and, if it matches a route, creates a run.
 // Returns the new run id ("" if deduped or unmatched).
-func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID, text string, mentioned bool) (string, error) {
+func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID, text string, mentioned bool, user string) (string, error) {
 	route := r.resolveRoute(ctx, channel, mentioned)
 	if route == nil {
 		return "", nil
@@ -208,7 +208,7 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 		if err := tx.CreateRun(store.Run{
 			ID: runID, AgentNamespace: route.AgentNamespace, AgentName: route.AgentName,
 			SessionID: sessionID, Phase: "Pending",
-			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"image":%q}`, channel, eventID, image),
+			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"image":%q,"user":%q}`, channel, eventID, image, user),
 			Input:  fmt.Sprintf(`{"text":%q}`, text),
 		}); err != nil {
 			return err
@@ -225,7 +225,7 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 // HandleThreadReply continues a conversation: a reply in a thread the bot is
 // already engaged in creates a follow-up run for the same agent (no @mention
 // needed). Returns "" if the thread has no prior bot run (so we ignore it).
-func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, threadTS, text string) (string, error) {
+func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, threadTS, text, user string) (string, error) {
 	var prior store.Run
 	found := false
 	if err := r.Store.Tx(ctx, func(tx store.Tx) error {
@@ -253,7 +253,7 @@ func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, thread
 		if err := tx.CreateRun(store.Run{
 			ID: runID, AgentNamespace: prior.AgentNamespace, AgentName: prior.AgentName,
 			SessionID: threadTS, Phase: "Pending",
-			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q}`, channel, eventID),
+			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"user":%q}`, channel, eventID, user),
 			Input:  fmt.Sprintf(`{"text":%q}`, text),
 		}); err != nil {
 			return err

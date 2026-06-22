@@ -58,10 +58,14 @@ func SlackChannel(source string) string { return slackSource(source).Channel }
 // SlackEventTS extracts the triggering message ts from a run's Source JSON.
 func SlackEventTS(source string) string { return slackSource(source).Event }
 
+// SlackUser extracts the requesting user's Slack id from a run's Source JSON.
+func SlackUser(source string) string { return slackSource(source).User }
+
 type slackSrc struct {
 	Trigger string `json:"trigger"`
 	Channel string `json:"channel"`
 	Event   string `json:"event"`
+	User    string `json:"user"`
 }
 
 func slackSource(source string) slackSrc {

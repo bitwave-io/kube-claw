@@ -63,17 +63,17 @@ func TestHandleMessage_RouteAndDedupe(t *testing.T) {
 	r := &Router{Config: testConfig(), Store: st}
 
 	// Unmatched channel → no run.
-	if id, err := r.HandleMessage(ctx, "evt-x", "C_NONE", "s", "hi", true); err != nil || id != "" {
+	if id, err := r.HandleMessage(ctx, "evt-x", "C_NONE", "s", "hi", true, "U_TEST"); err != nil || id != "" {
 		t.Fatalf("unmatched = %q, %v", id, err)
 	}
 
 	// Matched → run created.
-	id, err := r.HandleMessage(ctx, "evt-1", "C_COSTS", "thread-1", "why did cost spike?", true)
+	id, err := r.HandleMessage(ctx, "evt-1", "C_COSTS", "thread-1", "why did cost spike?", true, "U_TEST")
 	if err != nil || id == "" {
 		t.Fatalf("matched create = %q, %v", id, err)
 	}
 	// Duplicate event id → no second run.
-	id2, err := r.HandleMessage(ctx, "evt-1", "C_COSTS", "thread-1", "again", true)
+	id2, err := r.HandleMessage(ctx, "evt-1", "C_COSTS", "thread-1", "again", true, "U_TEST")
 	if err != nil || id2 != "" {
 		t.Fatalf("dedupe = %q, %v (want empty)", id2, err)
 	}

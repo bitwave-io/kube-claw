@@ -82,7 +82,7 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 			lg.Info("posted onboarding prompt", "channel", e.Channel, "inviter", e.Inviter)
 		}
 	case *slackevents.AppMentionEvent:
-		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), e.Text, true)
+		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), e.Text, true, e.User)
 		if err != nil {
 			lg.Error(err, "handle app_mention")
 		} else if runID != "" {
@@ -106,7 +106,7 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 		// A reply in a thread the bot started continues that conversation (no
 		// @mention needed); otherwise fall back to route matching.
 		if e.ThreadTimeStamp != "" && e.ThreadTimeStamp != e.TimeStamp {
-			if runID, err := r.HandleThreadReply(ctx, e.TimeStamp, e.Channel, e.ThreadTimeStamp, e.Text); err != nil {
+			if runID, err := r.HandleThreadReply(ctx, e.TimeStamp, e.Channel, e.ThreadTimeStamp, e.Text, e.User); err != nil {
 				lg.Error(err, "handle thread reply")
 			} else if runID != "" {
 				lg.Info("created follow-up run from thread reply", "run", runID, "channel", e.Channel)
@@ -114,7 +114,7 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 				return
 			}
 		}
-		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), e.Text, false)
+		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), e.Text, false, e.User)
 		if err != nil {
 			lg.Error(err, "handle message")
 		} else if runID != "" {
