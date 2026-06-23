@@ -7,13 +7,19 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
-
-	"github.com/traego/kube-claw/internal/store"
 )
 
-// Classifier picks the best base image for a request by matching it against the
-// registry's "when to use" descriptions. It runs a fast/cheap Haiku call in the
-// message path; on any error it returns "" (fall back to the agent's image).
+// AgentChoice is one routable agent (name + a "what it does" description, used by
+// the classifier to pick the best-fit agent for a request).
+type AgentChoice struct {
+	Namespace   string
+	Name        string
+	Description string
+}
+
+// Classifier picks the best-fit agent for a request by matching it against the
+// agents' descriptions. It runs a fast/cheap Haiku call in the message path; on
+// any error it returns "" (the caller falls back to the channel's default agent).
 type Classifier struct {
 	client anthropic.Client
 }
@@ -22,19 +28,22 @@ func NewClassifier(apiKey string) *Classifier {
 	return &Classifier{client: anthropic.NewClient(option.WithAPIKey(apiKey))}
 }
 
-// PickImage returns the name of the best-fit base image, or "" for none/default.
-func (c *Classifier) PickImage(ctx context.Context, request string, images []store.BaseImage) string {
-	if len(images) == 0 || strings.TrimSpace(request) == "" {
-		return ""
+// PickAgent returns the namespace+name of the best-fit agent, or ("","") to fall
+// back. With a single agent it returns it directly (no LLM call).
+func (c *Classifier) PickAgent(ctx context.Context, request string, agents []AgentChoice) (ns, name string) {
+	if len(agents) == 0 || strings.TrimSpace(request) == "" {
+		return "", ""
+	}
+	if len(agents) == 1 {
+		return agents[0].Namespace, agents[0].Name
 	}
 	var list strings.Builder
-	for _, im := range images {
-		fmt.Fprintf(&list, "- %s: %s\n", im.Name, im.Description)
+	for _, a := range agents {
+		fmt.Fprintf(&list, "- %s: %s\n", a.Name, a.Description)
 	}
-	sys := "You route a user request to the best-fit tool image. Given the request and a list of " +
-		"available images (name: when to use), reply with ONLY the single best image name from the " +
-		"list — or the word none if no specialized tooling is needed. Output just the name, nothing else."
-	user := fmt.Sprintf("Request:\n%s\n\nAvailable images:\n%snone: general request, no special tooling needed", request, list.String())
+	sys := "You route a user request to the best-fit agent. Given the request and a list of agents " +
+		"(name: what it's for), reply with ONLY the single best agent name from the list. Output just the name."
+	user := fmt.Sprintf("Request:\n%s\n\nAgents:\n%s", request, list.String())
 
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     "claude-haiku-4-5",
@@ -43,7 +52,7 @@ func (c *Classifier) PickImage(ctx context.Context, request string, images []sto
 		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(user))},
 	})
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	var pick string
 	for _, b := range resp.Content {
@@ -52,10 +61,10 @@ func (c *Classifier) PickImage(ctx context.Context, request string, images []sto
 		}
 	}
 	pick = strings.ToLower(strings.TrimSpace(pick))
-	for _, im := range images {
-		if strings.ToLower(im.Name) == pick {
-			return im.Name
+	for _, a := range agents {
+		if strings.ToLower(a.Name) == pick {
+			return a.Namespace, a.Name
 		}
 	}
-	return ""
+	return "", ""
 }

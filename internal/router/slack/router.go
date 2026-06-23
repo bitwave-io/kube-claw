@@ -57,25 +57,20 @@ type Router struct {
 	Secrets      *secrets.Service // for DM-based secret registration
 	Notifier     *Notifier        // for DM replies
 	UIBase       string           // intake link base URL
-	BotUserID    string           // this bot's Slack user id (set at connect)
-	DefaultAgent string           // agent assigned when a channel is onboarded
-	AgentsNS     string           // namespace for onboarded agents (default claw-agents)
-	Classifier   *Classifier      // LLM image router (nil = use the agent's own image)
+	BotUserID    string                          // this bot's Slack user id (set at connect)
+	DefaultAgent string                          // agent assigned when a channel is onboarded
+	AgentsNS     string                          // namespace for onboarded agents (default claw-agents)
+	Classifier   *Classifier                     // LLM agent router (nil = use the channel's agent)
+	AgentLister  func(context.Context) []AgentChoice // lists routable agents (injected; reads the CRDs)
 }
 
-// pickImage runs the classifier (if configured) against the registered base
-// images and returns the chosen base-image ref ("" = none/default).
-func (r *Router) pickImage(ctx context.Context, request string) string {
-	if r.Classifier == nil {
-		return ""
+// pickAgent runs the classifier (if configured) over the available agents and
+// returns the chosen agent ("","" = fall back to the channel's agent).
+func (r *Router) pickAgent(ctx context.Context, request string) (ns, name string) {
+	if r.Classifier == nil || r.AgentLister == nil {
+		return "", ""
 	}
-	var imgs []store.BaseImage
-	_ = r.Store.Tx(ctx, func(tx store.Tx) error {
-		got, e := tx.ListBaseImages()
-		imgs = got
-		return e
-	})
-	return r.Classifier.PickImage(ctx, request, imgs)
+	return r.Classifier.PickAgent(ctx, request, r.AgentLister(ctx))
 }
 
 // resolveRoute matches a channel to an agent: static Helm routes first, then a
@@ -196,8 +191,12 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 	if route == nil {
 		return "", nil
 	}
-	// New session → let the router pick the best tool image for this request.
-	image := r.pickImage(ctx, text)
+	// New session → let the router pick the best-fit agent (it carries its own
+	// image + prompt); fall back to the channel's configured agent.
+	agentNs, agentName := route.AgentNamespace, route.AgentName
+	if pns, pn := r.pickAgent(ctx, text); pn != "" {
+		agentNs, agentName = pns, pn
+	}
 	runID := "run-" + randHex()
 	created := false
 	err := r.Store.Tx(ctx, func(tx store.Tx) error {
@@ -206,9 +205,9 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 			return err
 		}
 		if err := tx.CreateRun(store.Run{
-			ID: runID, AgentNamespace: route.AgentNamespace, AgentName: route.AgentName,
+			ID: runID, AgentNamespace: agentNs, AgentName: agentName,
 			SessionID: sessionID, Phase: "Pending",
-			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"image":%q,"user":%q}`, channel, eventID, image, user),
+			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"user":%q}`, channel, eventID, user),
 			Input:  fmt.Sprintf(`{"text":%q}`, text),
 		}); err != nil {
 			return err

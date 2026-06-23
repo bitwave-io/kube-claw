@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -125,11 +126,33 @@ func main() {
 			Secrets: secSvc, Notifier: slackNotifier, UIBase: uiBaseURL,
 			DefaultAgent: defaultAgent, AgentsNS: "claw-agents",
 		}
-		// LLM image router: when the controller has an Anthropic key, it classifies
-		// each new request against the base-image registry and picks the best image.
+		// The router lists agent CRDs (each carries its image + prompt) so it can
+		// route a request to the best-fit agent.
+		reader := mgr.GetAPIReader()
+		slackRt.AgentLister = func(ctx context.Context) []slackrouter.AgentChoice {
+			var list clawv1alpha1.AgentList
+			if err := reader.List(ctx, &list, client.InNamespace("claw-agents")); err != nil {
+				return nil
+			}
+			out := make([]slackrouter.AgentChoice, 0, len(list.Items))
+			for i := range list.Items {
+				a := &list.Items[i]
+				desc := a.Name
+				if a.Spec.Model != nil && a.Spec.Model.SystemPrompt != "" {
+					desc = a.Spec.Model.SystemPrompt
+					if len(desc) > 300 {
+						desc = desc[:300]
+					}
+				}
+				out = append(out, slackrouter.AgentChoice{Namespace: a.Namespace, Name: a.Name, Description: desc})
+			}
+			return out
+		}
+		// LLM agent router: with an Anthropic key, classify each new request and
+		// pick the best-fit agent (which carries its own image + prompt).
 		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 			slackRt.Classifier = slackrouter.NewClassifier(key)
-			log.Info("slack image router enabled (llm classification)")
+			log.Info("slack agent router enabled (llm classification)")
 		}
 		log.Info("slack router configured", "routes", len(routes), "defaultAgent", defaultAgent)
 	}

@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
@@ -39,6 +40,11 @@ tr:last-child td{border-bottom:0}code{background:#f0f0f0;padding:.1rem .35rem;bo
 button{font:inherit;padding:.3rem .7rem;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:6px;cursor:pointer}
 .snip{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
 .link{word-break:break-all;background:#f0f0f0;padding:.6rem;border-radius:6px;display:block}
+.conv{background:#fff;border:1px solid var(--line);border-radius:8px;margin:1rem 0;overflow:hidden}
+.conv h3{margin:0;padding:.5rem .8rem;background:#f7f7f7;font-size:.85rem;font-weight:600;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:1rem}
+.turn{padding:.55rem .8rem;border-bottom:1px solid #f1f1f1;white-space:pre-wrap;word-break:break-word}.turn:last-child{border:0}
+.turn .who{font-weight:700;font-size:.72rem;text-transform:uppercase;letter-spacing:.03em;display:block;margin-bottom:.15rem}
+.turn.u{background:#fbfdff}.turn.u .who{color:#1967d2}.turn.a .who{color:#137333}
 </style></head><body>
 <nav><span class=brand>🦞 kube-claw</span>
 <a href=/ui/dashboard class="{{if eq .Active "dashboard"}}on{{end}}">Dashboard</a>
@@ -128,49 +134,117 @@ func (s *Server) rotateSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) conversationsPage(w http.ResponseWriter, r *http.Request) {
-	type turn struct {
-		store.Run
-		Channel, Input, Output string
+	type turn struct{ When, Input, Output, Phase string }
+	type conv struct {
+		Channel, Agent, When string
+		Turns                []turn
 	}
-	var turns []turn
+	var order []string
+	byKey := map[string]*conv{}
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
-		runs, e := tx.ListRuns(50)
+		runs, e := tx.ListRuns(300) // newest-first; grouped into threads below
 		if e != nil {
 			return e
 		}
 		for _, run := range runs {
-			t := turn{Run: run, Channel: jsonField(run.Source, "channel"), Input: jsonField(run.Input, "text")}
-			if outs, e := tx.ListOutputs(run.ID); e == nil && len(outs) > 0 {
-				t.Output = outs[len(outs)-1].Content
+			// A conversation = a Slack thread (SessionID). Non-session (CLI) runs
+			// stand alone, keyed by their own id.
+			key := run.SessionID
+			if key == "" {
+				key = run.ID
 			}
-			turns = append(turns, t)
+			c, ok := byKey[key]
+			if !ok {
+				c = &conv{Channel: jsonField(run.Source, "channel"), Agent: run.AgentName, When: run.CreatedAt}
+				byKey[key] = c
+				order = append(order, key) // first-seen = most recent activity
+			}
+			out := ""
+			if outs, e := tx.ListOutputs(run.ID); e == nil && len(outs) > 0 {
+				out = outs[len(outs)-1].Content
+			}
+			t := turn{When: run.CreatedAt, Input: jsonField(run.Input, "text"), Output: out, Phase: run.Phase}
+			c.Turns = append([]turn{t}, c.Turns...) // prepend → chronological within the thread
 		}
 		return nil
 	})
-	body := `<p class=mut>Most recent 50 runs — for audit. Inputs and answers are shown; secret values never appear here.</p>
-<table><tr><th>When</th><th>Agent</th><th>Channel</th><th>Phase</th><th>Request</th><th>Answer</th></tr>
-{{range .D}}<tr>
-<td class=mut>{{.CreatedAt}}</td><td><code>{{.AgentName}}</code></td><td class=mut>{{.Channel}}</td>
-<td><span class="pill {{.Phase}}">{{.Phase}}</span></td>
-<td><span class=snip>{{.Input}}</span></td><td><span class=snip>{{.Output}}</span></td>
-</tr>{{else}}<tr><td colspan=6 class=mut>No conversations yet.</td></tr>{{end}}</table>`
-	s.renderDash(w, "conversations", "Conversations", body, turns)
+	convs := make([]*conv, 0, len(order))
+	for _, k := range order {
+		convs = append(convs, byKey[k])
+	}
+	body := `<p class=mut>Each block is one continuous conversation (a Slack thread); turns are in order. Secret values never appear here.</p>
+{{range .D}}<div class=conv>
+<h3><span>{{if .Channel}}#{{.Channel}}{{else}}(direct){{end}} · {{.Agent}}</span><span class=mut>{{.When}}</span></h3>
+{{range .Turns}}
+<div class="turn u"><span class=who>user</span>{{.Input}}</div>
+<div class="turn a"><span class=who>kube-claw</span>{{if .Output}}{{.Output}}{{else}}<span class="pill {{.Phase}}">{{.Phase}}</span>{{end}}</div>
+{{end}}
+</div>{{else}}<p class=mut>No conversations yet.</p>{{end}}`
+	s.renderDash(w, "conversations", "Conversations", body, convs)
 }
 
 func (s *Server) agentsPage(w http.ResponseWriter, r *http.Request) {
 	var list clawv1alpha1.AgentList
 	_ = s.Reader.List(r.Context(), &list, client.InNamespace("claw-agents"))
-	body := `<p class=mut>Idle timeout is how long a session pod stays warm for follow-ups before scaling to zero (reset on each turn). Edit it inline.</p>
-<table><tr><th>Name</th><th>Namespace</th><th>Base image</th><th>Phase</th><th>Idle (warm) timeout</th><th>Secrets</th></tr>
-{{range .D.Items}}<tr>
-<td><code>{{.Name}}</code></td><td>{{.Namespace}}</td><td>{{.Spec.BaseImageRef}}</td>
+	var imgs []store.BaseImage
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.ListBaseImages()
+		imgs = got
+		return e
+	})
+	body := `<p class=mut>Agents pair a prompt with an image. The router picks the best-fit agent per request (by its prompt). Idle timeout is how long the pod stays warm for follow-ups (editable inline).</p>
+<table><tr><th>Name</th><th>Base image</th><th>Phase</th><th>Idle (warm) timeout</th><th>Secrets</th><th>Prompt</th></tr>
+{{range .D.Agents.Items}}<tr>
+<td><code>{{.Name}}</code></td><td>{{.Spec.BaseImageRef}}</td>
 <td><span class="pill {{.Status.Phase}}">{{.Status.Phase}}</span></td>
 <td><form method=post action=/ui/agents/idle style="margin:0;display:flex;gap:.3rem">
 <input type=hidden name=namespace value="{{.Namespace}}"><input type=hidden name=name value="{{.Name}}">
 <input name=idle value="{{.Spec.Runtime.IdleTimeout}}" size=6 placeholder=15m><button>Set</button></form></td>
 <td>{{range .Spec.Secrets}}<code>{{.Name}}</code> {{end}}</td>
-</tr>{{else}}<tr><td colspan=6 class=mut>No agents.</td></tr>{{end}}</table>`
-	s.renderDash(w, "agents", "Agents", body, &list)
+<td class=mut><span class=snip>{{if .Spec.Model}}{{.Spec.Model.SystemPrompt}}{{end}}</span></td>
+</tr>{{else}}<tr><td colspan=6 class=mut>No agents yet.</td></tr>{{end}}</table>
+
+<h2>Create an agent</h2>
+<form method=post action=/ui/agents/create style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:1rem;max-width:640px">
+<label>Name</label><br><input name=name placeholder="e.g. gcp-cost" required style="width:100%"><br><br>
+<label>Image</label><br>
+<select name=baseImageRef required style="width:100%"><option value="">— select a base image —</option>
+{{range .D.Images}}<option value="{{.Name}}">{{.Name}} — {{.Description}}</option>{{end}}</select><br><br>
+<label>Prompt (what this agent is for + how it should behave — this also drives routing)</label><br>
+<textarea name=prompt required style="width:100%;height:6rem;font:13px monospace" placeholder="You are a GCP cost assistant. Use gcloud/bq to answer billing and spend questions..."></textarea><br><br>
+<button>Create agent</button>
+</form>`
+	s.renderDash(w, "agents", "Agents", body, map[string]any{"Agents": &list, "Images": imgs})
+}
+
+// uiCreateAgent creates an Agent CRD from the dashboard form (image from the
+// dropdown, prompt as the system prompt + routing description).
+func (s *Server) uiCreateAgent(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	ns := r.FormValue("namespace")
+	if ns == "" {
+		ns = "claw-agents"
+	}
+	name, base, prompt := r.FormValue("name"), r.FormValue("baseImageRef"), r.FormValue("prompt")
+	if name == "" || base == "" {
+		writeErr(w, http.StatusBadRequest, "name and image are required")
+		return
+	}
+	agent := &clawv1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: clawv1alpha1.AgentSpec{
+			BaseImageRef: base,
+			Runtime:      clawv1alpha1.RuntimeSpec{Mode: "scaleToZeroSession", IdleTimeout: "15m"},
+		},
+	}
+	if prompt != "" {
+		agent.Spec.Model = &clawv1alpha1.ModelSpec{SystemPrompt: prompt}
+	}
+	if err := s.K8s.Create(r.Context(), agent); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.Redirect(w, r, "/ui/agents", http.StatusSeeOther)
 }
 
 // agentSetIdle updates an agent's warm-session idle timeout from the UI.
