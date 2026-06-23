@@ -18,6 +18,13 @@ spec:
       serviceAccountName: claw-controller
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # The distroless image runs as 65532; fsGroup makes the persistent volume
+        # group-writable by that user so the controller can create its SQLite DB
+        # (a root-owned PD mount otherwise yields SQLITE_CANTOPEN).
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
