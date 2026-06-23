@@ -1,6 +1,7 @@
-# Local-testing runner with bash + CA certs (the distroless default has neither),
-# so the Claude agent loop can run on a local arm64 k3d cluster. Production uses
-# the gcloud/aws/azure base images, which also carry bash. Not for prod.
+# Generic shell base: bash + curl + CA certs (the distroless runner has none),
+# so a generic agent's bash tool works without pulling in cloud CLIs. This is the
+# default base for non-cloud agents; cloud agents use the gcloud/aws/azure bases.
+# TARGETARCH defaults to amd64 (prod nodes); buildx --platform overrides it.
 FROM golang:1.26 AS build
 WORKDIR /src
 ENV GOTOOLCHAIN=local
@@ -8,7 +9,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG TARGETOS=linux
-ARG TARGETARCH=arm64
+ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/claw-runner ./cmd/claw-runner && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/claw-bootstrap ./cmd/claw-bootstrap
 
