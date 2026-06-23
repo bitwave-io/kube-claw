@@ -160,14 +160,38 @@ func (s *Server) conversationsPage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) agentsPage(w http.ResponseWriter, r *http.Request) {
 	var list clawv1alpha1.AgentList
 	_ = s.Reader.List(r.Context(), &list, client.InNamespace("claw-agents"))
-	body := `<table><tr><th>Name</th><th>Namespace</th><th>Base image</th><th>Phase</th><th>Idle</th><th>Secrets</th></tr>
+	body := `<p class=mut>Idle timeout is how long a session pod stays warm for follow-ups before scaling to zero (reset on each turn). Edit it inline.</p>
+<table><tr><th>Name</th><th>Namespace</th><th>Base image</th><th>Phase</th><th>Idle (warm) timeout</th><th>Secrets</th></tr>
 {{range .D.Items}}<tr>
 <td><code>{{.Name}}</code></td><td>{{.Namespace}}</td><td>{{.Spec.BaseImageRef}}</td>
 <td><span class="pill {{.Status.Phase}}">{{.Status.Phase}}</span></td>
-<td class=mut>{{.Spec.Runtime.IdleTimeout}}</td>
+<td><form method=post action=/ui/agents/idle style="margin:0;display:flex;gap:.3rem">
+<input type=hidden name=namespace value="{{.Namespace}}"><input type=hidden name=name value="{{.Name}}">
+<input name=idle value="{{.Spec.Runtime.IdleTimeout}}" size=6 placeholder=15m><button>Set</button></form></td>
 <td>{{range .Spec.Secrets}}<code>{{.Name}}</code> {{end}}</td>
 </tr>{{else}}<tr><td colspan=6 class=mut>No agents.</td></tr>{{end}}</table>`
 	s.renderDash(w, "agents", "Agents", body, &list)
+}
+
+// agentSetIdle updates an agent's warm-session idle timeout from the UI.
+func (s *Server) agentSetIdle(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	ns, name, idle := r.FormValue("namespace"), r.FormValue("name"), r.FormValue("idle")
+	if ns == "" || name == "" || idle == "" {
+		writeErr(w, http.StatusBadRequest, "namespace, name, idle required")
+		return
+	}
+	var agent clawv1alpha1.Agent
+	if err := s.K8s.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &agent); err != nil {
+		writeErr(w, http.StatusNotFound, "agent not found")
+		return
+	}
+	agent.Spec.Runtime.IdleTimeout = idle
+	if err := s.K8s.Update(r.Context(), &agent); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.Redirect(w, r, "/ui/agents", http.StatusSeeOther)
 }
 
 func (s *Server) channelsPage(w http.ResponseWriter, r *http.Request) {

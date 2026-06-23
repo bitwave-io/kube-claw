@@ -42,6 +42,13 @@ func main() {
 	// Real agent loop. Turn 1 is CLAW_INPUT; then, for a Slack session, stay warm
 	// and claim follow-up turns until the idle timeout (the pod scales to zero).
 	sess := newAgentSession(os.Getenv("CLAW_SYSTEM_PROMPT"))
+	// Cold-start replay: if this pod is serving a follow-up in an existing thread
+	// (the warm pod idled out), seed the conversation from the store.
+	if sid := os.Getenv("CLAW_SESSION_ID"); sid != "" {
+		hctx, hcancel := context.WithTimeout(context.Background(), 20*time.Second)
+		sess.loadHistory(hctx, sid)
+		hcancel()
+	}
 	answer := turn(sess, runID, input)
 	if err := postOutput(controllerURL, runID, answer); err != nil {
 		fmt.Fprintf(os.Stderr, "claw-runner: posting output: %v\n", err)

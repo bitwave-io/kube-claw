@@ -10,6 +10,48 @@ import (
 	"github.com/traego/kube-claw/internal/store"
 )
 
+// sessionHistory returns the prior succeeded turns (request + answer) for a run's
+// session, so a cold-start pod can replay the conversation. A run may only read
+// its own session's history (token-scoped).
+func (s *Server) sessionHistory(w http.ResponseWriter, r *http.Request) {
+	sid := r.PathValue("id")
+	claims, err := s.Signer.Verify(bearer(r))
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	type turn struct {
+		Input  string `json:"input"`
+		Output string `json:"output"`
+	}
+	turns := []turn{}
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		caller, e := tx.GetRun(claims.RunID)
+		if e != nil || caller.SessionID != sid {
+			return nil // caller not in this session → empty history
+		}
+		runs, e := tx.ListRunsBySession(sid, 50)
+		if e != nil {
+			return e
+		}
+		for _, run := range runs {
+			if run.ID == claims.RunID || run.Phase != "Succeeded" {
+				continue
+			}
+			in := jsonField(run.Input, "text")
+			out := ""
+			if outs, e := tx.ListOutputs(run.ID); e == nil && len(outs) > 0 {
+				out = outs[len(outs)-1].Content
+			}
+			if in != "" && out != "" {
+				turns = append(turns, turn{Input: in, Output: out})
+			}
+		}
+		return nil
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"turns": turns})
+}
+
 // requestSecretReq is what the agent's request_secret tool sends.
 type requestSecretReq struct {
 	Name        string `json:"name"`

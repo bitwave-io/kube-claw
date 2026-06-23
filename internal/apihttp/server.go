@@ -96,6 +96,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/base-images", s.baseImagesPage)
 	mux.HandleFunc("POST /ui/base-images", s.baseImagesSubmit)
 	mux.HandleFunc("POST /v1/connectors/slack/events", s.slackEvent)
+	mux.HandleFunc("GET /v1/sessions/{id}/history", s.sessionHistory)
 	mux.HandleFunc("POST /v1/runs/{id}/request-secret", s.requestSecret)
 	mux.HandleFunc("GET /v1/runs/{id}/requested-secret", s.requestedSecret)
 	mux.HandleFunc("POST /v1/sessions/{id}/claim-next", s.claimNextTurn)
@@ -111,6 +112,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /ui/secrets/rotate", s.rotateSecret)
 	mux.HandleFunc("GET /ui/conversations", s.conversationsPage)
 	mux.HandleFunc("GET /ui/agents", s.agentsPage)
+	mux.HandleFunc("POST /ui/agents/idle", s.agentSetIdle)
 	mux.HandleFunc("GET /ui/channels", s.channelsPage)
 	return mux
 }

@@ -90,6 +90,43 @@ func newAgentSession(systemPrompt string) *agentSession {
 	}
 }
 
+// loadHistory seeds the session with the thread's prior turns from the controller
+// so a cold-start pod (warm pod idled out) still remembers the conversation. A
+// no-op for a brand-new thread. Called once at pod start, before the first turn.
+func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
+	if s.controllerURL == "" || sessionID == "" || s.token == "" {
+		return
+	}
+	url := fmt.Sprintf("%s/v1/sessions/%s/history", s.controllerURL, sessionID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+	var out struct {
+		Turns []struct{ Input, Output string }
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return
+	}
+	for _, t := range out.Turns {
+		s.messages = append(s.messages,
+			anthropic.NewUserMessage(anthropic.NewTextBlock(t.Input)),
+			anthropic.NewAssistantMessage(anthropic.NewTextBlock(t.Output)))
+	}
+	if len(out.Turns) > 0 {
+		fmt.Printf("claw-runner: replayed %d prior turn(s) for session %s\n", len(out.Turns), sessionID)
+	}
+}
+
 // turn runs one user message to a final answer, executing bash tool calls along
 // the way. History accumulates on the session for the next turn.
 func (s *agentSession) turn(ctx context.Context, userText string) (string, error) {
