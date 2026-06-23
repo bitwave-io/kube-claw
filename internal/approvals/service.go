@@ -99,5 +99,17 @@ func (s *Service) load(ctx context.Context, reqID string) (store.SecretRequest, 
 			}, nil
 		}
 	}
-	return req, secrets.GrantBinding{}, fmt.Errorf("agent %s no longer references secret %q", req.AgentName, req.SecretName)
+	// On-demand secret (not declared on the agent): bind to the agent's current
+	// digest+spec with a fixed on-demand delivery hash (the agent chooses the path).
+	return req, secrets.GrantBinding{
+		ImageDigest:    agent.Status.SelectedImageDigest,
+		AgentSpecHash:  agent.Status.AgentSpecHash,
+		DeliveryHash:   OnDemandDeliveryHash,
+		ServiceAccount: "claw-agent-" + agent.Name,
+	}, nil
 }
+
+// OnDemandDeliveryHash is the fixed delivery binding for grants created via the
+// request_secret flow (the agent picks the file path at runtime, so the grant
+// authorizes the agent for the secret rather than a specific delivery path).
+const OnDemandDeliveryHash = "ondemand"

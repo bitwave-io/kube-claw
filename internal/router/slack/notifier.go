@@ -106,6 +106,30 @@ func (n *Notifier) PostOnboarding(ctx context.Context, target, channel, ns, agen
 	return err
 }
 
+// PostAccessRequest DMs a granter an on-demand access request with the agent's
+// justification (why) and who it's for, plus Approve/Deny buttons — so the
+// granter can make an informed call.
+func (n *Notifier) PostAccessRequest(ctx context.Context, granter, secretName, agentName, requester, reason, reqID string) error {
+	text := fmt.Sprintf(":lock: *Access request*\nAgent `%s` is requesting the secret *%s*", agentName, secretName)
+	if requester != "" {
+		text += fmt.Sprintf("\n• For: <@%s>", requester)
+	}
+	if reason != "" {
+		text += fmt.Sprintf("\n• Why: %s", reason)
+	} else {
+		text += "\n• Why: (no reason given)"
+	}
+	text += "\n\nApprove to grant this agent access."
+	section := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn", text, false, false), nil, nil)
+	approve := slack.NewButtonBlockElement("approve", ActionValue("approve", reqID),
+		slack.NewTextBlockObject("plain_text", "Approve", false, false)).WithStyle(slack.StylePrimary)
+	deny := slack.NewButtonBlockElement("deny", ActionValue("deny", reqID),
+		slack.NewTextBlockObject("plain_text", "Deny", false, false)).WithStyle(slack.StyleDanger)
+	actions := slack.NewActionBlock("claw-access", approve, deny)
+	_, _, err := n.api.PostMessageContext(ctx, granter, slack.MsgOptionBlocks(section, actions))
+	return err
+}
+
 // AddReaction adds an emoji reaction to a message (e.g. 🤔 while the agent
 // works). Needs the bot's reactions:write scope.
 func (n *Notifier) AddReaction(ctx context.Context, channel, ts, name string) error {

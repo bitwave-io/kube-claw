@@ -97,10 +97,10 @@ func (t *tx) CreateSecretRequest(req store.SecretRequest) error {
 	}
 	_, err := t.tx.Exec(
 		`INSERT INTO secret_requests (id, status, agent_ns, agent_name, run_id, secret_id,
-		   secret_name, image_digest, context, created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		   secret_name, image_digest, context, requested_by, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		req.ID, req.Status, req.AgentNamespace, req.AgentName, req.RunID, req.SecretID,
-		req.SecretName, req.ImageDigest, req.Context, req.CreatedAt,
+		req.SecretName, req.ImageDigest, req.Context, req.RequestedBy, req.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create secret request: %w", err)
@@ -108,18 +108,18 @@ func (t *tx) CreateSecretRequest(req store.SecretRequest) error {
 	return nil
 }
 
-const reqCols = `id, status, agent_ns, agent_name, run_id, secret_id, secret_name, image_digest, context, created_at, notified_at`
+const reqCols = `id, status, agent_ns, agent_name, run_id, secret_id, secret_name, image_digest, context, requested_by, created_at, notified_at`
 
 func scanReq(s interface{ Scan(...any) error }) (store.SecretRequest, error) {
 	var r store.SecretRequest
-	var runID, secretName, digest, ctx, notified sql.NullString
+	var runID, secretName, digest, ctx, requestedBy, notified sql.NullString
 	err := s.Scan(&r.ID, &r.Status, &r.AgentNamespace, &r.AgentName, &runID, &r.SecretID,
-		&secretName, &digest, &ctx, &r.CreatedAt, &notified)
+		&secretName, &digest, &ctx, &requestedBy, &r.CreatedAt, &notified)
 	if err != nil {
 		return r, err
 	}
 	r.RunID, r.SecretName, r.ImageDigest, r.Context = runID.String, secretName.String, digest.String, ctx.String
-	r.NotifiedAt = notified.String
+	r.RequestedBy, r.NotifiedAt = requestedBy.String, notified.String
 	return r, nil
 }
 

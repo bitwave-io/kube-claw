@@ -1,12 +1,18 @@
 package apihttp
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
+	"github.com/traego/kube-claw/internal/approvals"
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
+	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
 )
 
@@ -94,12 +100,24 @@ func (s *Server) availableSecrets(w http.ResponseWriter, r *http.Request) {
 type requestSecretReq struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	Reason      string `json:"reason"` // the agent's justification ("why"), shown to approvers
 }
 
-// requestSecret lets a running agent ask for a credential it discovered it needs.
-// It creates the secret (granter = the Slack user who started the run), mints a
-// one-time intake link, and DMs that user. Self-service: the user providing the
-// value via the link IS the authorization (they're the granter).
+// agentBinding loads an agent's current grant binding (digest + spec hash).
+func (s *Server) agentBinding(ctx context.Context, ns, name string) (digest, specHash string) {
+	var a clawv1alpha1.Agent
+	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &a); err == nil {
+		return a.Status.SelectedImageDigest, a.Status.AgentSpecHash
+	}
+	return "", ""
+}
+
+// requestSecret handles an agent's on-demand credential request:
+//   - secret doesn't exist  → provision it (requester becomes granter, agent is
+//     self-granted) and DM the requester a one-time intake link.
+//   - exists + agent granted → no-op (the agent retrieves it next poll).
+//   - exists + not granted  → open a SecretRequest and post Approve/Deny to the
+//     secret's GRANTERS with the agent's reason + who it's for (PAM access flow).
 func (s *Server) requestSecret(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
 	if claims, err := s.Signer.Verify(bearer(r)); err != nil || claims.RunID != runID {
@@ -120,37 +138,107 @@ func (s *Server) requestSecret(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "run not found")
 		return
 	}
+	ns, agentName := run.AgentNamespace, run.AgentName
 	user := slackrouter.SlackUser(run.Source)
-	if user == "" {
-		writeErr(w, http.StatusBadRequest, "no Slack user on this run to ask")
-		return
-	}
-	// Create (idempotent) with the requesting user as granter, then mint a link.
-	_, _ = s.Secrets.CreateSecret(r.Context(), run.AgentNamespace, req.Name, "", req.Description, []string{user})
-	tok, err := s.Secrets.MintIntakeToken(r.Context(), run.AgentNamespace, req.Name)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "mint intake: "+err.Error())
-		return
-	}
-	if s.Notifier != nil {
-		link := fmt.Sprintf("%s/ui/secret-intake/%s", s.UIBase, tok)
-		msg := fmt.Sprintf("An agent needs the secret *%s* to answer your request", req.Name)
-		if req.Description != "" {
-			msg += fmt.Sprintf(" (%s)", req.Description)
-		}
-		msg += ".\nAdd it with this one-time link (you're the approver):\n" + link
-		_ = s.Notifier.PostReply(r.Context(), user, "", msg)
-	}
+	digest, specHash := s.agentBinding(r.Context(), ns, agentName)
+
+	var sec store.Secret
+	exists := false
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
-		return tx.AppendAudit(store.AuditEvent{Type: "secret.requested_ondemand", RunID: runID,
-			Detail: map[string]any{"secret": req.Name, "user": user}})
+		if got, e := tx.GetSecret(ns, req.Name); e == nil {
+			sec, exists = got, true
+		}
+		return nil
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "requested", "user": user})
+
+	// 1. Doesn't exist → provision (self-service) + self-grant the agent.
+	if !exists {
+		if user == "" {
+			writeErr(w, http.StatusBadRequest, "no Slack user on this run to ask")
+			return
+		}
+		if _, err := s.Secrets.CreateSecret(r.Context(), ns, req.Name, "", req.Description, []string{user}); err != nil {
+			writeErr(w, http.StatusInternalServerError, "create secret: "+err.Error())
+			return
+		}
+		_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+			got, e := tx.GetSecret(ns, req.Name)
+			if e != nil {
+				return e
+			}
+			grant := store.Grant{
+				ID: secrets.NewID("grant"), AgentNamespace: ns, AgentName: agentName,
+				ServiceAccount: "claw-agent-" + agentName, ImageDigest: digest, AgentSpecHash: specHash,
+				DeliveryHash: approvals.OnDemandDeliveryHash, SecretID: got.ID,
+				ApprovedBy: user, Reason: "self-service provision",
+			}
+			if e := tx.CreateGrant(grant); e != nil {
+				return e
+			}
+			return tx.AppendAudit(store.AuditEvent{Type: "secret.provisioned", RunID: runID, SecretID: got.ID,
+				Actor: user, Detail: map[string]any{"secret": req.Name}})
+		})
+		tok, err := s.Secrets.MintIntakeToken(r.Context(), ns, req.Name)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "mint intake: "+err.Error())
+			return
+		}
+		if s.Notifier != nil {
+			link := fmt.Sprintf("%s/ui/secret-intake/%s", s.UIBase, tok)
+			msg := fmt.Sprintf("An agent needs *%s* to answer your request", req.Name)
+			if req.Description != "" {
+				msg += fmt.Sprintf(" (%s)", req.Description)
+			}
+			msg += ".\nAdd it with this one-time link:\n" + link
+			_ = s.Notifier.PostReply(r.Context(), user, "", msg)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "provisioning"})
+		return
+	}
+
+	// 2. Exists + agent already granted → nothing to do.
+	granted := false
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		if _, e := tx.FindValidGrant(ns, agentName, sec.ID, digest, specHash, approvals.OnDemandDeliveryHash); e == nil {
+			granted = true
+		}
+		return nil
+	})
+	if granted {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "granted"})
+		return
+	}
+
+	// 3. Exists + not granted → request access from the secret's granters.
+	var reqID string
+	isNew := false
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		if existing, e := tx.GetPendingRequest(ns, agentName, sec.ID); e == nil {
+			reqID = existing.ID
+			return nil
+		}
+		reqID = secrets.NewID("req")
+		if e := tx.CreateSecretRequest(store.SecretRequest{
+			ID: reqID, Status: "Pending", AgentNamespace: ns, AgentName: agentName, RunID: runID,
+			SecretID: sec.ID, SecretName: req.Name, ImageDigest: digest,
+			Context: req.Reason, RequestedBy: user,
+		}); e != nil {
+			return e
+		}
+		isNew = true
+		return tx.AppendAudit(store.AuditEvent{Type: "secret.access_requested", RunID: runID, SecretID: sec.ID,
+			Actor: agentName, Detail: map[string]any{"secret": req.Name, "requestedBy": user, "reason": req.Reason}})
+	})
+	if isNew && s.Notifier != nil {
+		for _, g := range sec.Granters {
+			_ = s.Notifier.PostAccessRequest(r.Context(), g, req.Name, agentName, user, req.Reason, reqID)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "access_requested"})
 }
 
-// requestedSecret returns an on-demand secret's value to the run once the user
-// has provided it. Authorized by the run's session token + the requesting user
-// being the secret's granter (self-service). 204 while not yet provided.
+// requestedSecret returns an on-demand secret's value once the agent holds a valid
+// grant (granter-approved or self-provisioned) and the value is present.
 func (s *Server) requestedSecret(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
 	if claims, err := s.Signer.Verify(bearer(r)); err != nil || claims.RunID != runID {
@@ -171,30 +259,27 @@ func (s *Server) requestedSecret(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "run not found")
 		return
 	}
-	user := slackrouter.SlackUser(run.Source)
+	ns, agentName := run.AgentNamespace, run.AgentName
+	digest, specHash := s.agentBinding(r.Context(), ns, agentName)
 
-	// Authorize: the requesting user must be a granter of this secret (self-service).
-	var ok bool
+	granted := false
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
-		sec, e := tx.GetSecret(run.AgentNamespace, name)
+		sec, e := tx.GetSecret(ns, name)
 		if e != nil {
 			return nil
 		}
-		for _, g := range sec.Granters {
-			if g == user {
-				ok = true
-			}
+		if _, ge := tx.FindValidGrant(ns, agentName, sec.ID, digest, specHash, approvals.OnDemandDeliveryHash); ge == nil {
+			granted = true
 		}
 		return nil
 	})
-	if !ok {
-		writeErr(w, http.StatusForbidden, "not authorized for this secret")
+	if !granted {
+		w.WriteHeader(http.StatusNoContent) // not granted yet — caller polls
 		return
 	}
-
-	val, err := s.Secrets.GetValue(r.Context(), run.AgentNamespace, name)
+	val, err := s.Secrets.GetValue(r.Context(), ns, name)
 	if err != nil || len(val) == 0 {
-		w.WriteHeader(http.StatusNoContent) // not provided yet — caller polls
+		w.WriteHeader(http.StatusNoContent) // granted but value not provided yet
 		return
 	}
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {

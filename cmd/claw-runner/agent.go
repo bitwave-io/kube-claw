@@ -64,20 +64,21 @@ func newAgentSession(systemPrompt string) *agentSession {
 	}
 	reqSecretTool := anthropic.ToolParam{
 		Name: "request_secret",
-		Description: anthropic.String("Request AND retrieve a credential. First call: DMs the user a one-time link to " +
-			"provide the secret. Call it AGAIN with the same name to install a secret the user has since provided — " +
-			"the value is written to a file in this container, the env var is set, and the path is returned. " +
-			"This tool is the ONLY way to get the value into the container: when the user says they've added a secret, " +
-			"call this again — do NOT just inspect the filesystem with bash (the value won't be there until you call this)."),
+		Description: anthropic.String("Request AND retrieve a credential. If the secret already exists but you're not " +
+			"granted access, this opens an access request that the secret's approvers must approve in Slack (your `reason` " +
+			"is shown to them). If it doesn't exist, the user is DMed a one-time link to provide it. Once approved/provided, " +
+			"call this AGAIN with the same name to install it — the value is written to a file, the env var is set, and the " +
+			"path is returned. This tool is the ONLY way to get the value into the container; do NOT bash-check for it."),
 		InputSchema: anthropic.ToolInputSchemaParam{
 			Properties: map[string]any{
-				"name":        map[string]any{"type": "string", "description": "short secret name, e.g. gcp-billing-readonly"},
+				"name":        map[string]any{"type": "string", "description": "secret name (use the EXACT name if it's listed as available to you), e.g. gcp-billing-readonly"},
 				"description": map[string]any{"type": "string", "description": "what the secret is and how you'll use it"},
+				"reason":      map[string]any{"type": "string", "description": "WHY you need it for this task and WHO it's for — shown to the approver so they can make an informed call"},
 				"env_var": map[string]any{"type": "string", "description": "OPTIONAL: the env var that should point at the credential file, " +
 					"e.g. GOOGLE_APPLICATION_CREDENTIALS for a GCP service-account key, AWS_SHARED_CREDENTIALS_FILE for AWS. " +
 					"Set GOOGLE_APPLICATION_CREDENTIALS for GCP keys and I'll also activate it for the gcloud CLI. Leave empty to just get the file path."},
 			},
-			Required: []string{"name", "description"},
+			Required: []string{"name", "description", "reason"},
 		},
 	}
 	return &agentSession{
@@ -199,10 +200,11 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 					var in struct {
 						Name        string `json:"name"`
 						Description string `json:"description"`
+						Reason      string `json:"reason"`
 						EnvVar      string `json:"env_var"`
 					}
 					_ = json.Unmarshal(raw, &in)
-					result = s.requestSecret(ctx, in.Name, in.Description, in.EnvVar)
+					result = s.requestSecret(ctx, in.Name, in.Description, in.Reason, in.EnvVar)
 				default: // bash
 					var in struct {
 						Command string `json:"command"`
@@ -231,21 +233,22 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 // requestSecret asks the controller to collect a credential on demand: it DMs
 // the user an intake link, then polls until the value is provided, writes it to
 // the tmpfs secrets dir, and points $GOOGLE_APPLICATION_CREDENTIALS at it.
-func (s *agentSession) requestSecret(ctx context.Context, name, description, envVar string) string {
+func (s *agentSession) requestSecret(ctx context.Context, name, description, reason, envVar string) string {
 	if s.controllerURL == "" || s.runID == "" || s.token == "" {
 		return "request_secret is unavailable in this run (no controller binding)."
 	}
-	// Retrieve-first: if the user has already provided this secret, install it
-	// immediately — no new DM, no waiting. (Makes re-calling to "fetch" idempotent.)
+	// Retrieve-first: if access is already granted + the value is present, install
+	// it immediately. (Makes re-calling to "fetch" idempotent.)
 	if path, content, ok := s.fetchRequested(ctx, name); ok {
 		return s.install(ctx, name, path, content, envVar)
 	}
-	// Otherwise ask the controller to create the secret + DM the user a link.
-	body, _ := json.Marshal(map[string]string{"name": name, "description": description})
+	// Otherwise ask the controller: it provisions (DMs a link) or opens an access
+	// request to the secret's approvers, depending on whether it exists/is granted.
+	body, _ := json.Marshal(map[string]string{"name": name, "description": description, "reason": reason})
 	if err := s.post(ctx, fmt.Sprintf("/v1/runs/%s/request-secret", s.runID), body); err != nil {
 		return "Couldn't request the secret: " + err.Error()
 	}
-	// Poll for a short window in case they provide it right away.
+	// Poll briefly in case it's approved/provided right away.
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
 		if path, content, ok := s.fetchRequested(ctx, name); ok {
@@ -253,7 +256,7 @@ func (s *agentSession) requestSecret(ctx context.Context, name, description, env
 		}
 		time.Sleep(5 * time.Second)
 	}
-	return fmt.Sprintf("I've DM'd the user a one-time link to add *%s*. When they say they've added it, call request_secret again with name=%q (do NOT check the filesystem — only this tool installs the value).", name, name)
+	return fmt.Sprintf("Access to *%s* isn't granted yet — either an approver needs to approve the request, or the user needs to provide the value via the DM link. Once they have, call request_secret again with name=%q to install it (do NOT bash-check — only this tool installs the value).", name, name)
 }
 
 // install writes a fetched secret into the pod and wires it up for the request's

@@ -3,7 +3,17 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"strings"
 )
+
+// additiveColumns are columns added to existing tables after their initial
+// CREATE. Run tolerantly so they apply to old DBs and no-op on new ones
+// (CREATE TABLE already includes them) — SQLite has no ADD COLUMN IF NOT EXISTS.
+var additiveColumns = []string{
+	`ALTER TABLE secrets ADD COLUMN description TEXT`,
+	`ALTER TABLE secret_requests ADD COLUMN notified_at TEXT`,
+	`ALTER TABLE secret_requests ADD COLUMN requested_by TEXT`,
+}
 
 // migrations is the ordered list of schema statements (DESIGN.md §7). All are
 // idempotent (IF NOT EXISTS); the full schema is created up front, repository
@@ -74,6 +84,7 @@ var migrations = []string{
 		secret_name  TEXT,
 		image_digest TEXT,
 		context      TEXT,
+		requested_by TEXT,
 		created_at   TEXT NOT NULL,
 		notified_at  TEXT
 	);`,
@@ -154,6 +165,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 	for i, stmt := range migrations {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migration %d: %w", i, err)
+		}
+	}
+	// Additive columns: ignore "duplicate column" so they apply once to old DBs.
+	for _, a := range additiveColumns {
+		if _, err := s.db.ExecContext(ctx, a); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("alter: %w", err)
 		}
 	}
 	return nil

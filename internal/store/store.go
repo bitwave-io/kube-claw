@@ -260,7 +260,8 @@ type SecretRequest struct {
 	SecretID       string `json:"secretId"`
 	SecretName     string `json:"secretName,omitempty"`
 	ImageDigest    string `json:"imageDigest"`
-	Context        string `json:"context,omitempty"`
+	Context        string `json:"context,omitempty"`    // the agent's justification ("why") for the approver
+	RequestedBy    string `json:"requestedBy,omitempty"` // Slack user the run is for ("who")
 	CreatedAt      string `json:"createdAt"`
 	NotifiedAt     string `json:"notifiedAt,omitempty"` // when the approval was posted to Slack (empty = not yet)
 }
