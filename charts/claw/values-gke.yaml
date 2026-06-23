@@ -1,0 +1,50 @@
+# GKE Autopilot overlay for the claw control plane.
+#   helm upgrade --install claw ./charts/claw -n claw-system -f charts/claw/values-gke.yaml \
+#     --set image.repository=REGION-docker.pkg.dev/PROJECT/REPO/claw-controller \
+#     --set image.tag=TAG \
+#     --set controller.runnerImage=REGION-docker.pkg.dev/PROJECT/REPO/claw-runner:TAG \
+#     --set controller.uiBaseURL=https://claw.example.com \
+#     --set ui.ingress.host=claw.example.com
+#
+# Replace the REGION/PROJECT/REPO/TAG placeholders below, or override with --set
+# (above) so this file stays free of environment-specific values.
+
+image:
+  repository: REGION-docker.pkg.dev/PROJECT/REPO/claw-controller
+  tag: TAG
+  pullPolicy: Always # prod: always pull the pinned tag from Artifact Registry
+
+controller:
+  runnerImage: REGION-docker.pkg.dev/PROJECT/REPO/claw-runner:TAG
+  # Public HTTPS URL of the intake UI (the Ingress host) — used in secret links.
+  uiBaseURL: https://claw.example.com
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  storage:
+    size: 20Gi
+    # Autopilot's default StorageClass is a ZONAL PD; with a single replica a
+    # cross-zone reschedule can't re-attach it. Use a regional class so the
+    # SQLite PVC survives a zone move. (premium-rwo is regional-capable on
+    # Autopilot; or create a custom regional-pd StorageClass.)
+    storageClassName: premium-rwo
+
+# Expose ONLY /ui/secret-intake/* over HTTPS via a GKE Ingress + managed cert.
+ui:
+  ingress:
+    enabled: true
+    host: claw.example.com
+    className: "gce"
+    tls:
+      enabled: true
+      secretName: claw-ui-tls
+
+# Enable after creating the claw-slack-tokens Secret (see scripts/deploy-secrets.sh).
+slack:
+  enabled: true
+  tokenSecretName: claw-slack-tokens
+  routes: []
