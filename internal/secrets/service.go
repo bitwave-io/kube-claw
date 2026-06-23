@@ -76,7 +76,9 @@ func (s *Service) GetValue(ctx context.Context, namespace, name string) ([]byte,
 
 // MintIntakeToken creates a one-time intake link token for a secret and returns
 // the RAW token (only the hash is stored). The caller embeds it in the URL.
-func (s *Service) MintIntakeToken(ctx context.Context, namespace, name string) (string, error) {
+// runID optionally links the token to the run that requested provisioning so the
+// agent is auto-resumed when the value is submitted (empty for e.g. UI rotate).
+func (s *Service) MintIntakeToken(ctx context.Context, namespace, name, runID string) (string, error) {
 	ttl := s.TokenTTL
 	if ttl <= 0 {
 		ttl = 15 * time.Minute
@@ -89,7 +91,7 @@ func (s *Service) MintIntakeToken(ctx context.Context, namespace, name string) (
 		if err != nil {
 			return err
 		}
-		return tx.CreateIntakeToken(hashToken(raw), sec.ID, expires)
+		return tx.CreateIntakeToken(hashToken(raw), sec.ID, runID, expires)
 	})
 	if err != nil {
 		return "", err
@@ -97,14 +99,39 @@ func (s *Service) MintIntakeToken(ctx context.Context, namespace, name string) (
 	return raw, nil
 }
 
-// SubmitIntake consumes a token (single-use) and stores the submitted value.
+// SubmitIntake consumes a token (single-use), stores the submitted value, and —
+// if the token was linked to a run — enqueues a follow-up turn in that Slack
+// thread so the agent resumes automatically (retrieve-first now finds the value).
 func (s *Service) SubmitIntake(ctx context.Context, rawToken string, plaintext []byte) error {
 	return s.Store.Tx(ctx, func(tx store.Tx) error {
-		secretID, err := tx.ConsumeIntakeToken(hashToken(rawToken))
+		secretID, runID, err := tx.ConsumeIntakeToken(hashToken(rawToken))
 		if err != nil {
 			return err
 		}
-		return s.addVersion(tx, secretID, plaintext, "intake-ui")
+		if err := s.addVersion(tx, secretID, plaintext, "intake-ui"); err != nil {
+			return err
+		}
+		if runID == "" {
+			return nil
+		}
+		run, err := tx.GetRun(runID)
+		if err != nil || run.SessionID == "" {
+			return nil // nothing to resume into
+		}
+		cont := store.Run{
+			ID:             newID("run"),
+			AgentNamespace: run.AgentNamespace,
+			AgentName:      run.AgentName,
+			SessionID:      run.SessionID,
+			Phase:          "Pending",
+			Source:         run.Source, // same channel/thread/user
+			Input:          `{"text":"The credential I requested was just provided — please continue with my previous request."}`,
+		}
+		if err := tx.CreateRun(cont); err != nil {
+			return err
+		}
+		return tx.AppendAudit(store.AuditEvent{Type: "secret.access_resumed", RunID: cont.ID,
+			SecretID: secretID, Detail: map[string]any{"originalRun": runID, "via": "intake"}})
 	})
 }
 

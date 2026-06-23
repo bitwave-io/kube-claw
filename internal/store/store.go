@@ -89,12 +89,14 @@ type Tx interface {
 	// LatestSecretVersion returns the newest version of a secret.
 	LatestSecretVersion(secretID string) (SecretVersion, error)
 
-	// CreateIntakeToken stores a one-time secret-intake token (hash only).
-	CreateIntakeToken(tokenHash, secretID, expiresAt string) error
+	// CreateIntakeToken stores a one-time secret-intake token (hash only). runID
+	// optionally links the token to the run that requested provisioning, so the
+	// agent can be auto-resumed when the value is submitted.
+	CreateIntakeToken(tokenHash, secretID, runID, expiresAt string) error
 	// ConsumeIntakeToken validates + single-use-consumes a token, returning its
-	// secret id. Returns ErrNotFound for unknown, ErrTokenUsed for already
-	// consumed, ErrTokenExpired for expired.
-	ConsumeIntakeToken(tokenHash string) (secretID string, err error)
+	// secret id and the linked run id (if any). Returns ErrNotFound for unknown,
+	// ErrTokenUsed for already consumed, ErrTokenExpired for expired.
+	ConsumeIntakeToken(tokenHash string) (secretID, runID string, err error)
 
 	// --- grants & requests (Phase 4) ---
 

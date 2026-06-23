@@ -29,7 +29,7 @@ func TestUIIntake(t *testing.T) {
 	if _, err := svc.CreateSecret(ctx, "claw-agents", "k", "generic", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	tok, err := svc.MintIntakeToken(ctx, "claw-agents", "k")
+	tok, err := svc.MintIntakeToken(ctx, "claw-agents", "k", "")
 	if err != nil {
 		t.Fatal(err)
 	}

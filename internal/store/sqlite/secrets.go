@@ -159,10 +159,10 @@ func (t *tx) LatestSecretVersion(secretID string) (store.SecretVersion, error) {
 }
 
 // CreateIntakeToken stores a one-time intake token (caller passes the HASH).
-func (t *tx) CreateIntakeToken(tokenHash, secretID, expiresAt string) error {
+func (t *tx) CreateIntakeToken(tokenHash, secretID, runID, expiresAt string) error {
 	_, err := t.tx.Exec(
-		`INSERT INTO intake_tokens (token_hash, secret_id, created_at, expires_at) VALUES (?,?,?,?)`,
-		tokenHash, secretID, store.NowRFC3339(), expiresAt,
+		`INSERT INTO intake_tokens (token_hash, secret_id, run_id, created_at, expires_at) VALUES (?,?,?,?,?)`,
+		tokenHash, secretID, runID, store.NowRFC3339(), expiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create intake token: %w", err)
@@ -171,28 +171,28 @@ func (t *tx) CreateIntakeToken(tokenHash, secretID, expiresAt string) error {
 }
 
 // ConsumeIntakeToken validates + single-use-consumes a token by hash.
-func (t *tx) ConsumeIntakeToken(tokenHash string) (string, error) {
+func (t *tx) ConsumeIntakeToken(tokenHash string) (string, string, error) {
 	var secretID, expiresAt string
-	var consumedAt sql.NullString
+	var runID, consumedAt sql.NullString
 	err := t.tx.QueryRow(
-		`SELECT secret_id, expires_at, consumed_at FROM intake_tokens WHERE token_hash=?`, tokenHash,
-	).Scan(&secretID, &expiresAt, &consumedAt)
+		`SELECT secret_id, run_id, expires_at, consumed_at FROM intake_tokens WHERE token_hash=?`, tokenHash,
+	).Scan(&secretID, &runID, &expiresAt, &consumedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", store.ErrNotFound
+		return "", "", store.ErrNotFound
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if consumedAt.Valid {
-		return "", store.ErrTokenUsed
+		return "", "", store.ErrTokenUsed
 	}
 	if expiresAt < store.NowRFC3339() { // RFC3339Nano sorts lexically by time
-		return "", store.ErrTokenExpired
+		return "", "", store.ErrTokenExpired
 	}
 	if _, err := t.tx.Exec(
 		`UPDATE intake_tokens SET consumed_at=? WHERE token_hash=?`, store.NowRFC3339(), tokenHash,
 	); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return secretID, nil
+	return secretID, runID.String, nil
 }

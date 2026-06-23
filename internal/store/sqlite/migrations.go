@@ -13,6 +13,7 @@ var additiveColumns = []string{
 	`ALTER TABLE secrets ADD COLUMN description TEXT`,
 	`ALTER TABLE secret_requests ADD COLUMN notified_at TEXT`,
 	`ALTER TABLE secret_requests ADD COLUMN requested_by TEXT`,
+	`ALTER TABLE intake_tokens ADD COLUMN run_id TEXT`,
 }
 
 // migrations is the ordered list of schema statements (DESIGN.md §7). All are
@@ -131,6 +132,7 @@ var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS intake_tokens (
 		token_hash  TEXT PRIMARY KEY,
 		secret_id   TEXT NOT NULL,
+		run_id      TEXT,
 		created_at  TEXT NOT NULL,
 		expires_at  TEXT NOT NULL,
 		consumed_at TEXT

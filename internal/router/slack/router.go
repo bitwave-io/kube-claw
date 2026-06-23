@@ -160,7 +160,7 @@ func (r *Router) HandleDM(ctx context.Context, userID, text string) string {
 	const ns = "claw-agents"
 	// Create (ignore already-exists) with the DMing user as granter, then mint a link.
 	_, _ = r.Secrets.CreateSecret(ctx, ns, name, "", desc, []string{userID})
-	tok, err := r.Secrets.MintIntakeToken(ctx, ns, name)
+	tok, err := r.Secrets.MintIntakeToken(ctx, ns, name, "")
 	if err != nil {
 		return "couldn't create the intake link: " + err.Error()
 	}

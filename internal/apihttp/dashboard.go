@@ -128,7 +128,7 @@ func (s *Server) rotateSecret(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "namespace and name required")
 		return
 	}
-	tok, err := s.Secrets.MintIntakeToken(r.Context(), ns, name)
+	tok, err := s.Secrets.MintIntakeToken(r.Context(), ns, name, "")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

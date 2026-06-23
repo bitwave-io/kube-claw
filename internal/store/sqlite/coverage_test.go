@@ -81,12 +81,12 @@ func TestIntakeTokens(t *testing.T) {
 
 	// valid → consume once
 	if err := s.Tx(ctx, func(tx store.Tx) error {
-		return tx.CreateIntakeToken("hash-1", "sec-1", "2999-01-01T00:00:00Z")
+		return tx.CreateIntakeToken("hash-1", "sec-1", "", "2999-01-01T00:00:00Z")
 	}); err != nil {
 		t.Fatal(err)
 	}
 	_ = s.Tx(ctx, func(tx store.Tx) error {
-		secID, err := tx.ConsumeIntakeToken("hash-1")
+		secID, _, err := tx.ConsumeIntakeToken("hash-1")
 		if err != nil || secID != "sec-1" {
 			t.Fatalf("consume = %q, %v", secID, err)
 		}
@@ -94,24 +94,24 @@ func TestIntakeTokens(t *testing.T) {
 	})
 	// reuse → ErrTokenUsed
 	_ = s.Tx(ctx, func(tx store.Tx) error {
-		if _, err := tx.ConsumeIntakeToken("hash-1"); !errors.Is(err, store.ErrTokenUsed) {
+		if _, _, err := tx.ConsumeIntakeToken("hash-1"); !errors.Is(err, store.ErrTokenUsed) {
 			t.Fatalf("reuse = %v, want ErrTokenUsed", err)
 		}
 		return nil
 	})
 	// unknown → ErrNotFound
 	_ = s.Tx(ctx, func(tx store.Tx) error {
-		if _, err := tx.ConsumeIntakeToken("nope"); !errors.Is(err, store.ErrNotFound) {
+		if _, _, err := tx.ConsumeIntakeToken("nope"); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("unknown = %v", err)
 		}
 		return nil
 	})
 	// expired → ErrTokenExpired
 	_ = s.Tx(ctx, func(tx store.Tx) error {
-		return tx.CreateIntakeToken("hash-old", "sec-1", "2000-01-01T00:00:00Z")
+		return tx.CreateIntakeToken("hash-old", "sec-1", "", "2000-01-01T00:00:00Z")
 	})
 	_ = s.Tx(ctx, func(tx store.Tx) error {
-		if _, err := tx.ConsumeIntakeToken("hash-old"); !errors.Is(err, store.ErrTokenExpired) {
+		if _, _, err := tx.ConsumeIntakeToken("hash-old"); !errors.Is(err, store.ErrTokenExpired) {
 			t.Fatalf("expired = %v, want ErrTokenExpired", err)
 		}
 		return nil

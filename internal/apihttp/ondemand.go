@@ -178,7 +178,7 @@ func (s *Server) requestSecret(w http.ResponseWriter, r *http.Request) {
 			return tx.AppendAudit(store.AuditEvent{Type: "secret.provisioned", RunID: runID, SecretID: got.ID,
 				Actor: user, Detail: map[string]any{"secret": req.Name}})
 		})
-		tok, err := s.Secrets.MintIntakeToken(r.Context(), ns, req.Name)
+		tok, err := s.Secrets.MintIntakeToken(r.Context(), ns, req.Name, runID)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "mint intake: "+err.Error())
 			return

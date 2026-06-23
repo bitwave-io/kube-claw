@@ -55,7 +55,7 @@ func TestService_IntakeSingleUse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tok, err := svc.MintIntakeToken(ctx, "claw-agents", "slack-token")
+	tok, err := svc.MintIntakeToken(ctx, "claw-agents", "slack-token", "")
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}

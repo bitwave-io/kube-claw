@@ -363,7 +363,7 @@ func (s *Server) createSecret(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	tok, err := s.Secrets.MintIntakeToken(r.Context(), req.Namespace, req.Name)
+	tok, err := s.Secrets.MintIntakeToken(r.Context(), req.Namespace, req.Name, "")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
