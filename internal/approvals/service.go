@@ -27,11 +27,15 @@ type Service struct {
 // Approve is the break-glass path (no granter check; caller is already trusted,
 // e.g. the authenticated CLI/API).
 func (s *Service) Approve(ctx context.Context, reqID, approver, reason string) (store.Grant, error) {
-	_, binding, err := s.load(ctx, reqID)
+	req, binding, err := s.load(ctx, reqID)
 	if err != nil {
 		return store.Grant{}, err
 	}
-	return s.Secrets.ApproveRequest(ctx, reqID, approver, reason, binding)
+	grant, err := s.Secrets.ApproveRequest(ctx, reqID, approver, reason, binding)
+	if err == nil {
+		s.resumeOnDemand(ctx, req, grant)
+	}
+	return grant, err
 }
 
 // ApproveByPrincipal is the Slack path: the principal (Slack user id) MUST be a
@@ -48,7 +52,41 @@ func (s *Service) ApproveByPrincipal(ctx context.Context, reqID, principal, reas
 	if !ok {
 		return store.Grant{}, ErrNotGranter
 	}
-	return s.Secrets.ApproveRequest(ctx, reqID, principal, reason, binding)
+	grant, err := s.Secrets.ApproveRequest(ctx, reqID, principal, reason, binding)
+	if err == nil {
+		s.resumeOnDemand(ctx, req, grant)
+	}
+	return grant, err
+}
+
+// resumeOnDemand auto-continues an on-demand request after approval: it enqueues
+// a follow-up turn in the original Slack thread so the agent retries (retrieve-
+// first now finds the grant and installs it) without the user nudging it. Only
+// for on-demand grants (declared-secret runs resume via the run engine's gate).
+func (s *Service) resumeOnDemand(ctx context.Context, req store.SecretRequest, grant store.Grant) {
+	if grant.DeliveryHash != OnDemandDeliveryHash || req.RunID == "" {
+		return
+	}
+	_ = s.Store.Tx(ctx, func(tx store.Tx) error {
+		run, e := tx.GetRun(req.RunID)
+		if e != nil || run.SessionID == "" {
+			return nil // no session to resume into
+		}
+		cont := store.Run{
+			ID:             secrets.NewID("run"),
+			AgentNamespace: run.AgentNamespace,
+			AgentName:      run.AgentName,
+			SessionID:      run.SessionID,
+			Phase:          "Pending",
+			Source:         run.Source, // same channel/thread/user
+			Input:          `{"text":"The credential I requested was just approved — please continue with my previous request."}`,
+		}
+		if e := tx.CreateRun(cont); e != nil {
+			return e
+		}
+		return tx.AppendAudit(store.AuditEvent{Type: "secret.access_resumed", RunID: cont.ID,
+			SecretID: req.SecretID, GrantID: grant.ID, Detail: map[string]any{"originalRun": req.RunID}})
+	})
 }
 
 // Deny denies a request.
