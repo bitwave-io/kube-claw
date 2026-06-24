@@ -14,32 +14,59 @@ value never enters the model's context or the logs.
 
 ---
 
-## Quickstart (local, k3d)
+## Quickstart (any Kubernetes cluster)
 
-**Prerequisites:** Docker, [k3d](https://k3d.io), `kubectl`, `helm`, Go 1.26, and a
-Slack app + Anthropic API key.
+**Prerequisites:** a Kubernetes cluster you're already `kubectl`-authenticated to
+(the current context is used), a container registry the cluster can pull from,
+`kubectl`, `helm`, and a Slack app + Anthropic API key. Nodes are assumed amd64.
 
-```bash
-# 1. create a local cluster
-k3d cluster create claw-dev
-
-# 2. build + load images (controller, runner, a base image)
-make images            # or see scripts/ for the prebuilt-binary path on arm64
-k3d image import claw-controller:dev claw-runner:dev -c claw-dev
-
-# 3. install (prompts for Slack tokens + the Anthropic key)
-./scripts/install.sh
-```
-
-Or deploy non-interactively from a gitignored secrets file:
+> Standing up a fresh **GKE Autopilot** cluster end-to-end (cluster, registry,
+> images, HTTPS Ingress, secrets)? See **[`docs/deploy-gke.md`](docs/deploy-gke.md)**.
 
 ```bash
-# .secrets.env  (never committed)
-#   SLACK_APP_TOKEN=xapp-...
-#   SLACK_BOT_TOKEN=xoxb-...
-#   ANTHROPIC_API_KEY=sk-ant-...
-./scripts/deploy-secrets.sh
+# Point at your registry + pick a tag.
+export REGISTRY=ghcr.io/your-org           # or REGION-docker.pkg.dev/PROJECT/REPO
+export TAG=$(git rev-parse --short HEAD)
+
+# 1. Build + push the images. (CI does this on every change —
+#    .github/workflows/build-push.yml — or build them directly:)
+docker buildx build --platform linux/amd64 -f Dockerfile             -t $REGISTRY/claw-controller:$TAG  --push .
+docker buildx build --platform linux/amd64 -f Dockerfile.runner-bash -t $REGISTRY/claw-runner-bash:$TAG --push .
+docker buildx build --platform linux/amd64 -f images/gcloud/Dockerfile -t $REGISTRY/claw-gcloud:$TAG     --push .
+
+# 2. CRD + namespaces (Helm does NOT upgrade CRDs from crds/, so apply with kubectl).
+kubectl apply -f charts/claw-crds/crds/
+kubectl create namespace claw-system
+kubectl create namespace claw-agents
+
+# 3. Secrets (out-of-band — never in Helm values).
+for ns in claw-agents claw-system; do
+  kubectl -n $ns create secret generic claw-anthropic-key --from-literal=api-key="$ANTHROPIC_API_KEY"
+done
+kubectl -n claw-system create secret generic claw-slack-tokens \
+  --from-literal=app-token="$SLACK_APP_TOKEN" --from-literal=bot-token="$SLACK_BOT_TOKEN"
+kubectl -n claw-system create secret generic claw-admin --from-literal=password="$ADMIN_PASSWORD"  # admin UI
+
+# 4. Install the control plane.
+helm upgrade --install claw ./charts/claw -n claw-system \
+  --set image.repository=$REGISTRY/claw-controller --set image.tag=$TAG \
+  --set controller.runnerImage=$REGISTRY/claw-runner-bash:$TAG \
+  --set slack.enabled=true
+kubectl -n claw-system rollout status statefulset/claw-controller
+
+# 5. Register a base image + an agent (via a port-forward to the controller API).
+kubectl -n claw-system port-forward svc/claw-controller 8443:8443 &
+export CLAW_CONTROLLER_URL=http://localhost:8443
+claw baseimage create default --image $REGISTRY/claw-runner-bash:$TAG \
+  --description "generic shell base (bash, curl)"
+claw agent create assistant --base default \
+  --system-prompt "You are a helpful assistant working in an isolated sandboxed container."
 ```
+
+**Admin UI:** `kubectl -n claw-system port-forward svc/claw-controller 8443:8443`, then
+http://localhost:8443/ui (basic auth: `admin` / your `claw-admin` password). For an
+HTTPS Ingress so secret-intake links work without a port-forward, see
+[`docs/deploy-gke.md`](docs/deploy-gke.md).
 
 ### Slack app setup
 
@@ -58,16 +85,18 @@ Also enable the **Messages Tab** (App Home) so the bot's DM channel is usable.
 
 ### First run
 
-Add the bot to a channel — it DMs you to pick how it behaves. Then:
+Add the bot to a channel — it DMs you to pick how it behaves. Then `@`-mention it:
 
 ```
-@your-bot check our GCP spend over the last 3 days and suggest savings
+@your-bot what can you help with?
 ```
 
-→ 👀 reaction → the router picks the **best-fit agent** (which carries its own
-image + prompt) → the agent calls `request_secret` → you paste a read-only billing
-key via the one-time link → it runs `bq`/`gcloud` and answers in-thread, then stays
-warm for follow-ups.
+→ 👀 reaction → the router picks the **best-fit agent** (each carries its own image
++ prompt) → it answers in-thread and stays warm for follow-ups. For a task that
+needs a credential (e.g. a cloud agent asked about spend), the agent calls
+`request_secret` → you provide/approve it via a one-time link → it installs the
+credential and continues. Add specialized agents (a cloud SDK base, etc.) and the
+router dispatches to them automatically.
 
 ---
 
