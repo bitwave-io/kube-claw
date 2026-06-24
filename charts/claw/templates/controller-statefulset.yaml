@@ -41,6 +41,11 @@ spec:
             - --runner-image={{ .Values.controller.runnerImage }}
             - --self-url={{ .Values.controller.selfURL }}
           env:
+            # Opt-in: restrict agent egress (deny east/west). Off by default —
+            # requires a CNI that enforces egress correctly for host-networked
+            # NodeLocalDNS; enable + verify per cluster.
+            - name: CLAW_RESTRICT_AGENT_EGRESS
+              value: {{ .Values.controller.restrictAgentEgress | default false | quote }}
             # Admin dashboard (/ui/*) basic-auth password (user "admin").
             # Optional: if the secret/key is absent, the admin UI is unauthenticated.
             - name: CLAW_ADMIN_PASSWORD

@@ -41,6 +41,11 @@ import (
 type AgentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// RestrictAgentEgress, when true, adds an egress NetworkPolicy that denies
+	// east/west (private CIDRs) while allowing DNS, the controller, and the public
+	// internet. Off by default: it requires a CNI that enforces egress correctly
+	// for host-networked DNS (NodeLocalDNS) — enable + verify per cluster.
+	RestrictAgentEgress bool
 }
 
 // +kubebuilder:rbac:groups=claw.run,resources=agents,verbs=get;list;watch;update;patch
@@ -194,6 +199,25 @@ func (r *AgentReconciler) ensureNetworkPolicy(ctx context.Context, agent *clawv1
 	// CNI with FQDN policy (Cilium / GKE Dataplane V2) — tracked as a follow-up.
 	udp, tcp := corev1.ProtocolUDP, corev1.ProtocolTCP
 	dnsPort := intstr.FromInt(53)
+	policyTypes := []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}
+	var egress []networkingv1.NetworkPolicyEgressRule
+	if r.RestrictAgentEgress {
+		policyTypes = append(policyTypes, networkingv1.PolicyTypeEgress)
+		egress = []networkingv1.NetworkPolicyEgressRule{
+			{ // DNS — port 53 to anywhere (covers kube-dns AND host-networked NodeLocalDNS)
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &udp, Port: &dnsPort}, {Protocol: &tcp, Port: &dnsPort}},
+			},
+			{ // the claw controller (login, materialize, run callbacks)
+				To: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: nsSelector("claw-system")}},
+			},
+			{ // public internet (model + cloud APIs); private ranges excluded → no east/west
+				To: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{
+					CIDR:   "0.0.0.0/0",
+					Except: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"},
+				}}},
+			},
+		}
+	}
 	np := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: agent.Name + "-agent", Namespace: agent.Namespace},
 	}
@@ -201,22 +225,8 @@ func (r *AgentReconciler) ensureNetworkPolicy(ctx context.Context, agent *clawv1
 		np.Labels = agentLabels(agent.Name)
 		np.Spec = networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"claw.run/agent": agent.Name}},
-			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
-			Egress: []networkingv1.NetworkPolicyEgressRule{
-				{ // DNS resolution (kube-dns in kube-system)
-					To:    []networkingv1.NetworkPolicyPeer{{NamespaceSelector: nsSelector("kube-system")}},
-					Ports: []networkingv1.NetworkPolicyPort{{Protocol: &udp, Port: &dnsPort}, {Protocol: &tcp, Port: &dnsPort}},
-				},
-				{ // the claw controller (login, materialize, run callbacks)
-					To: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: nsSelector("claw-system")}},
-				},
-				{ // public internet (model + cloud APIs); private ranges excluded → no east/west
-					To: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{
-						CIDR:   "0.0.0.0/0",
-						Except: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"},
-					}}},
-				},
-			},
+			PolicyTypes: policyTypes,
+			Egress:      egress,
 		}
 		return controllerutil.SetControllerReference(agent, np, r.Scheme)
 	})

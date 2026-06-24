@@ -68,8 +68,9 @@ func main() {
 	}
 
 	if err := (&controller.AgentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		RestrictAgentEgress: os.Getenv("CLAW_RESTRICT_AGENT_EGRESS") == "true",
 	}).SetupWithManager(mgr); err != nil {
 		log.Error(err, "unable to set up AgentReconciler")
 		os.Exit(1)
