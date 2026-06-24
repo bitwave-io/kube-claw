@@ -2,8 +2,6 @@ package apihttp
 
 import (
 	"encoding/json"
-	"fmt"
-	"html"
 	"net/http"
 
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
@@ -121,24 +119,21 @@ func (s *Server) promptsPage(w http.ResponseWriter, r *http.Request) {
 		ps = got
 		return e
 	})
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, `<!doctype html><meta charset=utf-8><title>claw · prompts</title>`+
-		`<style>body{font:14px system-ui;max-width:760px;margin:2rem auto;padding:0 1rem}`+
-		`textarea{width:100%;height:8rem;font:13px monospace}label{font-weight:600}`+
-		`form{margin:1.5rem 0;padding:1rem;border:1px solid #ddd;border-radius:8px}</style>`+
-		`<h1>Agent prompts</h1><p>Edits apply on the agent's next run.</p>`)
-	for _, p := range ps {
-		fmt.Fprintf(w, `<form method=post action=/ui/prompts>`+
-			`<label>%s / %s</label><input type=hidden name=namespace value=%q><input type=hidden name=name value=%q>`+
-			`<textarea name=content>%s</textarea><button>Save</button> <small>updated %s</small></form>`,
-			html.EscapeString(p.AgentNamespace), html.EscapeString(p.AgentName),
-			p.AgentNamespace, p.AgentName, html.EscapeString(p.Content), html.EscapeString(p.UpdatedAt))
-	}
-	fmt.Fprint(w, `<form method=post action=/ui/prompts><label>New / replace</label>`+
-		`<input name=namespace placeholder="namespace (default claw-agents)"> `+
-		`<input name=name placeholder="agent name" required><br><br>`+
-		`<textarea name=content placeholder="system prompt" required></textarea>`+
-		`<button>Save</button></form>`)
+	body := `<p class=mut>Per-agent system prompts (DB overrides of the agent's CRD prompt). Edits apply on the agent's next run.</p>
+{{range .D}}<form method=post action=/ui/prompts style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:1rem;margin:1rem 0">
+<label><code>{{.AgentNamespace}}/{{.AgentName}}</code></label>
+<input type=hidden name=namespace value="{{.AgentNamespace}}"><input type=hidden name=name value="{{.AgentName}}">
+<textarea name=content style="width:100%;height:7rem;font:13px monospace">{{.Content}}</textarea><br>
+<button>Save</button> <span class=mut>updated {{.UpdatedAt}}</span></form>
+{{else}}<p class=mut>No stored prompt overrides — agents use the prompt from their CRD.</p>{{end}}
+
+<h2>New / replace</h2>
+<form method=post action=/ui/prompts style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:1rem;max-width:660px">
+<label>Namespace</label><br><input name=namespace placeholder="claw-agents" style="width:100%"><br><br>
+<label>Agent name</label><br><input name=name required style="width:100%"><br><br>
+<label>System prompt</label><br><textarea name=content required style="width:100%;height:7rem;font:13px monospace"></textarea><br><br>
+<button>Save</button></form>`
+	s.renderDash(w, "prompts", "Agent prompts", body, ps)
 }
 
 func (s *Server) promptsSubmit(w http.ResponseWriter, r *http.Request) {

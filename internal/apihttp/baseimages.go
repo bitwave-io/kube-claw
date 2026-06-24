@@ -2,7 +2,6 @@ package apihttp
 
 import (
 	"encoding/json"
-	"html/template"
 	"net/http"
 
 	"github.com/traego/kube-claw/internal/store"
@@ -58,24 +57,7 @@ func (s *Server) allBaseImages(r *http.Request) ([]store.BaseImage, error) {
 	return out, err
 }
 
-// --- minimal admin UI for registering base images (not secret) ---
-
-var baseImagesTmpl = template.Must(template.New("bi").Parse(`<!doctype html>
-<html><head><meta charset="utf-8"><title>kube-claw base images</title></head>
-<body style="font-family:system-ui;max-width:48rem;margin:2rem auto">
-<h2>Base images</h2>
-<table border="1" cellpadding="6" style="border-collapse:collapse;width:100%">
-<tr><th align="left">Name</th><th align="left">Image</th><th align="left">When to use</th></tr>
-{{range .}}<tr><td>{{.Name}}</td><td><code>{{.Image}}</code></td><td>{{.Description}}</td></tr>{{end}}
-</table>
-<h3>Register a base image</h3>
-<form method="POST" action="/ui/base-images">
-  <p>Name <input name="name" required></p>
-  <p>Image <input name="image" size="60" required placeholder="ghcr.io/org/img@sha256:..."></p>
-  <p>When to use <input name="description" size="60" placeholder="has gcloud+bq, for GCP cost agents"></p>
-  <button type="submit">Register</button>
-</form>
-</body></html>`))
+// --- admin UI for registering base images (rendered in the dashboard chrome) ---
 
 func (s *Server) baseImagesPage(w http.ResponseWriter, r *http.Request) {
 	imgs, err := s.allBaseImages(r)
@@ -83,8 +65,20 @@ func (s *Server) baseImagesPage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = baseImagesTmpl.Execute(w, imgs)
+	body := `<p class=mut>Base images are the containers agents run in. Register a generic shell base for general agents and specialized images (a cloud SDK, etc.) for specialized ones; an agent references one by name. The "when to use" text helps the router pick the right agent.</p>
+<table><tr><th>Name</th><th>Image</th><th>When to use</th></tr>
+{{range .D}}<tr>
+<td><code>{{.Name}}</code></td><td><code>{{.Image}}</code></td><td class=mut>{{.Description}}</td>
+</tr>{{else}}<tr><td colspan=3 class=mut>No base images yet.</td></tr>{{end}}</table>
+
+<h2>Register a base image</h2>
+<form method=post action=/ui/base-images style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:1rem;max-width:660px">
+<label>Name</label><br><input name=name required placeholder="e.g. default, gcloud, aws" style="width:100%"><br><br>
+<label>Image</label><br><input name=image required placeholder="REGION-docker.pkg.dev/PROJECT/REPO/claw-runner-bash:TAG" style="width:100%"><br><br>
+<label>When to use</label><br><input name=description style="width:100%" placeholder="generic shell base (bash, curl); or 'Google Cloud SDK — GCP/billing queries'"><br><br>
+<button>Register</button>
+</form>`
+	s.renderDash(w, "images", "Base images", body, imgs)
 }
 
 func (s *Server) baseImagesSubmit(w http.ResponseWriter, r *http.Request) {
