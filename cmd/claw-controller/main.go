@@ -29,6 +29,7 @@ import (
 	"github.com/traego/kube-claw/internal/identity"
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/runengine"
+	"github.com/traego/kube-claw/internal/scheduler"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store/sqlite"
 )
@@ -210,6 +211,11 @@ func main() {
 		AnthropicSecret: anthropicSecret,
 	}); err != nil {
 		log.Error(err, "unable to add run engine")
+		os.Exit(1)
+	}
+
+	if err := mgr.Add(&scheduler.Scheduler{Store: st, Interval: 30 * time.Second}); err != nil {
+		log.Error(err, "unable to add scheduler")
 		os.Exit(1)
 	}
 

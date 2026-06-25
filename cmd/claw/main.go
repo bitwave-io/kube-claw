@@ -32,8 +32,36 @@ func newRootCmd() *cobra.Command {
 		def = "http://localhost:8443"
 	}
 	root.PersistentFlags().StringVar(&controllerURL, "controller-url", def, "controller API base URL")
-	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd(), newAgentsCmd(), newBaseImageCmd(), newPromptCmd())
+	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd(), newAgentsCmd(), newBaseImageCmd(), newPromptCmd(), newScheduleCmd())
 	return root
+}
+
+func newScheduleCmd() *cobra.Command {
+	c := &cobra.Command{Use: "schedule", Short: "Manage cron schedules (recurring agent invocations)"}
+	var agent, cronExpr, prompt, channel, namespace string
+	create := &cobra.Command{
+		Use: "create", Short: "Create a schedule: at each cron occurrence the agent runs the prompt and posts to the channel",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return apiJSON(http.MethodPost, "/v1/schedules", map[string]any{
+				"agent": agent, "cron": cronExpr, "prompt": prompt, "channel": channel, "namespace": namespace,
+			}, nil)
+		},
+	}
+	create.Flags().StringVar(&agent, "agent", "", "agent to invoke")
+	create.Flags().StringVar(&cronExpr, "cron", "", "5-field cron (UTC), e.g. '0 9 * * *'")
+	create.Flags().StringVar(&prompt, "prompt", "", "prompt given to the agent each run")
+	create.Flags().StringVar(&channel, "channel", "", "Slack channel id to post the answer to")
+	create.Flags().StringVar(&namespace, "namespace", "claw-agents", "agent namespace")
+	_ = create.MarkFlagRequired("agent")
+	_ = create.MarkFlagRequired("cron")
+	_ = create.MarkFlagRequired("prompt")
+	del := &cobra.Command{Use: "delete ID", Short: "Delete a schedule", Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiJSON(http.MethodDelete, "/v1/schedules/"+args[0], nil, nil)
+		}}
+	c.AddCommand(create, del, &cobra.Command{Use: "list", Short: "List schedules",
+		RunE: func(_ *cobra.Command, _ []string) error { return apiPrint(http.MethodGet, "/v1/schedules") }})
+	return c
 }
 
 func newSecretCmd() *cobra.Command {

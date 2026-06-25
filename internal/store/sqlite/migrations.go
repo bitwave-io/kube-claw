@@ -137,6 +137,18 @@ var migrations = []string{
 		expires_at  TEXT NOT NULL,
 		consumed_at TEXT
 	);`,
+	`CREATE TABLE IF NOT EXISTS schedules (
+		id          TEXT PRIMARY KEY,
+		agent_ns    TEXT NOT NULL,
+		agent_name  TEXT NOT NULL,
+		cron        TEXT NOT NULL,
+		prompt      TEXT NOT NULL,
+		channel     TEXT,
+		enabled     INTEGER NOT NULL DEFAULT 1,
+		last_run_at TEXT,
+		next_run_at TEXT,
+		created_at  TEXT NOT NULL
+	);`,
 	`CREATE TABLE IF NOT EXISTS prompts (
 		agent_ns   TEXT NOT NULL,
 		agent_name TEXT NOT NULL,

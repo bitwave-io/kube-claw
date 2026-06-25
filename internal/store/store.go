@@ -156,6 +156,33 @@ type Tx interface {
 	GetChannelConfig(channel string) (ChannelConfig, error)
 	// ListChannelConfigs returns all configured channels.
 	ListChannelConfigs() ([]ChannelConfig, error)
+
+	// --- schedules (cron-triggered agent invocations) ---
+
+	// SetSchedule creates or replaces a schedule.
+	SetSchedule(s Schedule) error
+	// GetSchedule returns a schedule by id, or ErrNotFound.
+	GetSchedule(id string) (Schedule, error)
+	// ListSchedules returns all schedules.
+	ListSchedules() ([]Schedule, error)
+	// DeleteSchedule removes a schedule.
+	DeleteSchedule(id string) error
+}
+
+// Schedule is a cron-triggered agent invocation: at each cron occurrence the
+// scheduler creates a run for the agent with Prompt as input and posts the answer
+// to the Slack channel. DB-backed (like prompts/channel configs), not a CRD.
+type Schedule struct {
+	ID             string `json:"id"`
+	AgentNamespace string `json:"agentNamespace"`
+	AgentName      string `json:"agentName"`
+	Cron           string `json:"cron"`    // standard 5-field cron, e.g. "0 9 * * *"
+	Prompt         string `json:"prompt"`  // the input given to the agent each run
+	Channel        string `json:"channel"` // Slack channel id to post the answer to
+	Enabled        bool   `json:"enabled"`
+	LastRunAt      string `json:"lastRunAt,omitempty"`
+	NextRunAt      string `json:"nextRunAt,omitempty"`
+	CreatedAt      string `json:"createdAt"`
 }
 
 // ChannelConfig is per-Slack-channel bot behavior, set via the onboarding flow

@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.51.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/slack-go/slack v0.26.0
 	github.com/spf13/cobra v1.10.2
 	github.com/tink-crypto/tink-go/v2 v2.7.0

@@ -53,6 +53,7 @@ button{font:inherit;padding:.3rem .7rem;border:1px solid var(--accent);backgroun
 <a href=/ui/conversations class="{{if eq .Active "conversations"}}on{{end}}">Conversations</a>
 <a href=/ui/audit class="{{if eq .Active "audit"}}on{{end}}">Audit</a>
 <a href=/ui/agents class="{{if eq .Active "agents"}}on{{end}}">Agents</a>
+<a href=/ui/schedules class="{{if eq .Active "schedules"}}on{{end}}">Schedules</a>
 <a href=/ui/base-images class="{{if eq .Active "images"}}on{{end}}">Images</a>
 <a href=/ui/prompts class="{{if eq .Active "prompts"}}on{{end}}">Prompts</a>
 <a href=/ui/channels class="{{if eq .Active "channels"}}on{{end}}">Channels</a>
