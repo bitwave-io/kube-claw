@@ -162,12 +162,13 @@ func TestEngineEdgeCases(t *testing.T) {
 	must(t, eng.tick(ctx))
 	assertPhase(t, st, "run-1", "Blocked")
 
-	// Run whose agent doesn't exist → evaluate returns, run untouched.
+	// Run whose agent doesn't exist → failed (a missing agent never becomes
+	// ready, so the run must terminate rather than retry forever).
 	must(t, st.Tx(ctx, func(tx store.Tx) error {
 		return tx.CreateRun(store.Run{ID: "run-2", AgentNamespace: "claw-agents", AgentName: "ghost", Phase: "Pending"})
 	}))
 	eng.evaluate(ctx, store.Run{ID: "run-2", AgentNamespace: "claw-agents", AgentName: "ghost", Phase: "Pending"})
-	assertPhase(t, st, "run-2", "Pending")
+	assertPhase(t, st, "run-2", "Failed")
 }
 
 func must(t *testing.T, err error) {

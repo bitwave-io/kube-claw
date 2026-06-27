@@ -117,6 +117,20 @@ func (e *Engine) evaluate(ctx context.Context, run store.Run) {
 
 	var agent clawv1alpha1.Agent
 	if err := e.K8s.Get(ctx, types.NamespacedName{Namespace: run.AgentNamespace, Name: run.AgentName}, &agent); err != nil {
+		// A missing agent never becomes ready: without this the run stays Pending
+		// and the engine retries it every tick forever (log spam, no worker). Fail
+		// it so it terminates. Transient API errors still return → retried later.
+		if apierrors.IsNotFound(err) {
+			_ = e.Store.Tx(ctx, func(tx store.Tx) error {
+				if err := tx.MarkRunFailed(run.ID); err != nil {
+					return err
+				}
+				return tx.AppendAudit(store.AuditEvent{Type: "agentrun.failed", RunID: run.ID, Actor: "runengine",
+					Detail: map[string]any{"reason": "agent not found", "agent": run.AgentNamespace + "/" + run.AgentName}})
+			})
+			lg.Info("run marked failed (agent not found)")
+			return
+		}
 		lg.Error(err, "load agent")
 		return
 	}
