@@ -13,10 +13,13 @@ import (
 	"path/filepath"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -42,7 +45,7 @@ func init() {
 }
 
 func main() {
-	var dataDir, probeAddr, apiAddr, uiAddr, uiBaseURL, runnerImage, selfURL, anthropicSecret, defaultAgent string
+	var dataDir, probeAddr, apiAddr, uiAddr, uiBaseURL, runnerImage, selfURL, anthropicSecret, defaultAgent, logFormat string
 	var enableRouter bool
 	flag.StringVar(&dataDir, "data-dir", "/var/lib/claw", "directory for the SQLite store")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe bind address")
@@ -52,11 +55,14 @@ func main() {
 	flag.StringVar(&runnerImage, "runner-image", "kube-claw-runner:dev", "image used for agent run Jobs")
 	flag.StringVar(&selfURL, "self-url", "http://claw-controller.claw-system.svc:8443", "in-cluster URL run pods use to reach the controller")
 	flag.StringVar(&anthropicSecret, "anthropic-secret", "claw-anthropic-key", "K8s secret (key \"api-key\") injected into run pods for the agent loop")
-	flag.StringVar(&defaultAgent, "default-agent", "assistant", "agent assigned when a Slack channel is onboarded")
+	flag.StringVar(&defaultAgent, "default-agent", "general", "agent assigned when a Slack channel is onboarded")
 	flag.BoolVar(&enableRouter, "enable-router", true, "run the embedded Slack router")
+	flag.StringVar(&logFormat, "log-format", "console", "log output format: \"console\" (human-readable, for local dev) or \"json\" (structured, for cloud log backends)")
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	// json => structured logs that Cloud Logging / Azure Monitor / CloudWatch
+	// parse into queryable fields; console => human-readable for `kubectl logs`.
+	ctrl.SetLogger(zap.New(zap.UseDevMode(logFormat != "json")))
 	log := ctrl.Log.WithName("setup")
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -228,6 +234,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Seed the default agent so the control plane works out of the box: Slack
+	// channel onboarding assigns DefaultAgent, and the run engine blocks forever
+	// if that Agent CR does not exist. Idempotent — created once, never clobbers
+	// an operator-edited agent. Runs via a direct client so it doesn't depend on
+	// the manager cache being started.
+	if err := seedDefaultAgent(context.Background(), mgr.GetConfig(), defaultAgent); err != nil {
+		log.Error(err, "unable to seed default agent", "agent", defaultAgent)
+		os.Exit(1)
+	}
 
 	log.Info("starting claw-controller")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
@@ -248,4 +263,50 @@ func parseSlackRoutes(s string) []slackrouter.Route {
 		return nil
 	}
 	return routes
+}
+
+// seedDefaultAgent ensures a usable default Agent exists in claw-agents so the
+// control plane works on a fresh install. Without it, the first onboarded Slack
+// channel routes to DefaultAgent, the run engine can't load that (nonexistent)
+// Agent, and every run for it spins forever on "Agent.claw.run not found".
+//
+// It's idempotent and create-only: if the agent already exists (operator-edited
+// or seeded on a prior boot) it's left untouched. The seed carries no
+// baseImageRef/image, so the run engine falls back to the global runner image,
+// and no secrets, so it launches without an approval gate.
+func seedDefaultAgent(ctx context.Context, cfg *rest.Config, name string) error {
+	const ns = "claw-agents"
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+
+	var existing clawv1alpha1.Agent
+	err = c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &existing)
+	if err == nil {
+		return nil // already present — don't clobber operator edits
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	agent := &clawv1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: clawv1alpha1.AgentSpec{
+			DisplayName: "General Assistant",
+			Runtime:     clawv1alpha1.RuntimeSpec{Mode: "scaleToZeroSession", IdleTimeout: "15m"},
+			Model: &clawv1alpha1.ModelSpec{
+				SystemPrompt: "You are a helpful cloud operations assistant. Answer questions clearly and ask for clarification when a request is ambiguous.",
+			},
+		},
+	}
+	if err := c.Create(ctx, agent); err != nil {
+		// A racing replica may have created it between our Get and Create.
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+	ctrl.Log.WithName("setup").Info("seeded default agent", "namespace", ns, "agent", name)
+	return nil
 }

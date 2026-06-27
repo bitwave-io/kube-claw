@@ -1,7 +1,18 @@
 image:
   repository: docker.io/bitwavecode/kube-claw-controller
-  tag: latest
+  # Pin to an immutable release tag (NOT :latest). :latest makes upgrades
+  # non-deterministic — same tag => no pod spec change => `helm upgrade` won't
+  # roll new code, and `helm rollback` can't restore a prior image. CI publishes
+  # v<semver> (on git tags) and sha-<commit> tags; bump this in lockstep with
+  # Chart.yaml appVersion. Quickstart users can override to :latest if desired.
+  tag: v0.2.1
   pullPolicy: IfNotPresent
+
+# Namespace agents live in. Created by the deploy script (scripts/deploy-gke.sh /
+# install.sh) before the chart is installed; the controller seeds a default Agent
+# here on startup so the install works out of the box. Not chart-managed to avoid
+# Helm ownership conflicts with the imperatively-created namespace.
+agentNamespace: claw-agents
 
 controller:
   # Opt-in agent egress restriction (deny east/west). Verify per-cluster before enabling.
@@ -9,8 +20,13 @@ controller:
   replicas: 1
   dataDir: /var/lib/claw
   enableRouter: true
-  # Image the run engine launches for each run Job (DESIGN.md §11).
-  runnerImage: docker.io/bitwavecode/kube-claw-runner:latest
+  # Controller log format: "console" (human-readable, for local `kubectl logs`)
+  # or "json" (structured — set in cloud overlays so the log backend parses
+  # severity/message into queryable fields). See values-gke.yaml.
+  logFormat: console
+  # Image the run engine launches for each run Job (DESIGN.md §11). Pinned to the
+  # same release tag as the controller (see image.tag note re: :latest).
+  runnerImage: docker.io/bitwavecode/kube-claw-runner:v0.2.1
   # Admin dashboard (/ui) basic-auth password is read from this Secret (key
   # "password", user "admin"). Absent secret/key => the admin UI is unauthenticated.
   # scripts/install.sh creates it; create out-of-band otherwise.

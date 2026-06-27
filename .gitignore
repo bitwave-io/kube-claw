@@ -1,5 +1,8 @@
 .idea/
 /bin/
+# stray `go build ./cmd/...` binaries dropped at repo root
+/claw-controller
+/claw-runner
 *.db
 *.db-wal
 *.db-shm

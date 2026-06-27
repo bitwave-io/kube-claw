@@ -40,6 +40,7 @@ spec:
             - --ui-base-url={{ .Values.controller.uiBaseURL }}
             - --runner-image={{ .Values.controller.runnerImage }}
             - --self-url={{ .Values.controller.selfURL }}
+            - --log-format={{ .Values.controller.logFormat }}
           env:
             # Opt-in: restrict agent egress (deny east/west). Off by default —
             # requires a CNI that enforces egress correctly for host-networked

@@ -16,6 +16,9 @@ image:
 
 controller:
   runnerImage: REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-runner:TAG
+  # Structured JSON logs so Cloud Logging parses severity/message into fields.
+  # (Same applies to AKS/Azure Monitor and EKS/CloudWatch overlays.)
+  logFormat: json
   # Public HTTPS URL of the intake UI (the Ingress host) — used in secret links.
   uiBaseURL: https://claw.example.com
   # Admin dashboard basic-auth password is read from this secret (key "password").
