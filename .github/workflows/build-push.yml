@@ -1,17 +1,21 @@
 name: build-push
 
-# Build + push the kube-claw images to Artifact Registry.
+# Build + push the kube-claw images to Docker Hub (docker.io/bitwavecode/claw-*).
 #
 # Triggers only when the image build inputs change (the Dockerfiles AND the Go
 # source/modules they compile in — a Dockerfile-only filter would ship stale
-# images when runner/controller code changes), plus manual dispatch.
+# images when runner/controller code changes), plus version tags and manual
+# dispatch.
 #
-# Auth: a GCP service-account key stored as the repo secret GCP_SA_KEY
-#   (claw-ci@traego-infra.iam.gserviceaccount.com, roles/artifactregistry.writer).
+# Auth: a Docker Hub access token (Read & Write) stored as the repo secrets
+#   DOCKERHUB_USERNAME (e.g. patwhitebw) and DOCKERHUB_TOKEN. The user must be a
+#   member of the bitwavecode org with push rights; the public image repos are
+#   created automatically on first push.
 on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ["v*"]
     paths:
       - "Dockerfile"
       - "Dockerfile.runner"
@@ -25,9 +29,7 @@ on:
       - ".github/workflows/build-push.yml"
 
 env:
-  PROJECT: traego-infra
-  REGION: us-central1
-  REPO: claw
+  NAMESPACE: bitwavecode
 
 jobs:
   build-push:
@@ -46,17 +48,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - id: auth
-        uses: google-github-actions/auth@v2
+      - uses: docker/login-action@v3
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ env.NAMESPACE }}/claw-${{ matrix.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=semver,pattern={{version}}
 
       - name: Build + push claw-${{ matrix.name }}
         uses: docker/build-push-action@v6
@@ -65,8 +71,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT }}/${{ env.REPO }}/claw-${{ matrix.name }}:${{ github.sha }}
-            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT }}/${{ env.REPO }}/claw-${{ matrix.name }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=claw-${{ matrix.name }}
           cache-to: type=gha,scope=claw-${{ matrix.name }},mode=max

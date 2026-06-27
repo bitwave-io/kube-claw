@@ -33,6 +33,15 @@ test-envtest: generate manifests
 build: generate
 	go build ./...
 
+# Build the controller + runner images locally (tag :dev) for k3d/local dev.
+# For pushing to a registry, use docker buildx --push (see README "Advanced:
+# building a custom image") or scripts/build-push-gke.sh.
+IMAGE_TAG ?= dev
+.PHONY: images
+images:
+	docker build -f Dockerfile        -t claw-controller:$(IMAGE_TAG) .
+	docker build -f Dockerfile.runner -t claw-runner:$(IMAGE_TAG) .
+
 .PHONY: fmt
 fmt:
 	go fmt ./...

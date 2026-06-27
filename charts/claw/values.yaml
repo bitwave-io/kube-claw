@@ -1,6 +1,6 @@
 image:
-  repository: ghcr.io/traego/claw-controller
-  tag: dev
+  repository: docker.io/bitwavecode/claw-controller
+  tag: latest
   pullPolicy: IfNotPresent
 
 controller:
@@ -10,7 +10,11 @@ controller:
   dataDir: /var/lib/claw
   enableRouter: true
   # Image the run engine launches for each run Job (DESIGN.md §11).
-  runnerImage: claw-runner:dev
+  runnerImage: docker.io/bitwavecode/claw-runner:latest
+  # Admin dashboard (/ui) basic-auth password is read from this Secret (key
+  # "password", user "admin"). Absent secret/key => the admin UI is unauthenticated.
+  # scripts/install.sh creates it; create out-of-band otherwise.
+  adminSecretName: claw-admin
   # In-cluster URL run pods use to reach the controller API.
   selfURL: http://claw-controller.claw-system.svc:8443
   # Public base URL of the secret-intake UI (used in returned links). Override to

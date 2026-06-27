@@ -7,6 +7,7 @@
 #        SLACK_APP_TOKEN=xapp-...        # Socket Mode app-level token
 #        SLACK_BOT_TOKEN=xoxb-...        # bot token (chat:write, reactions:write)
 #        ANTHROPIC_API_KEY=sk-ant-...    # powers the agent loop
+#        ADMIN_PASSWORD=...              # admin dashboard (/ui) basic-auth   [optional]
 #   2. ./scripts/deploy-secrets.sh [path-to-secrets-file]
 #
 # Channels are NOT configured here — add the bot to any channel and it DMs the
@@ -34,6 +35,12 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     kubectl -n "$n" create secret generic claw-anthropic-key \
       --from-literal=api-key="$ANTHROPIC_API_KEY" --dry-run=client -o yaml | kubectl apply -f -
   done
+fi
+
+if [ -n "${ADMIN_PASSWORD:-}" ]; then
+  echo "Creating admin dashboard password Secret in $NS..."
+  kubectl -n "$NS" create secret generic claw-admin \
+    --from-literal=password="$ADMIN_PASSWORD" --dry-run=client -o yaml | kubectl apply -f -
 fi
 
 echo "helm upgrade..."

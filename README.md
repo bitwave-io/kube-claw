@@ -14,59 +14,38 @@ value never enters the model's context or the logs.
 
 ---
 
-## Quickstart (any Kubernetes cluster)
+## Quickstart
 
-**Prerequisites:** a Kubernetes cluster you're already `kubectl`-authenticated to
-(the current context is used), a container registry the cluster can pull from,
-`kubectl`, `helm`, and a Slack app + Anthropic API key. Nodes are assumed amd64.
+**Prerequisites:** an authenticated `kubectl` pointed at any cluster, `helm`, and a
+Slack app + Anthropic API key. No Docker build — the install pulls published images
+from Docker Hub (`docker.io/bitwavecode/claw-*`).
+
+```bash
+# Installs onto your CURRENT kubectl context.
+# Prompts for: Slack tokens, the Anthropic key, an admin password, and an optional UI URL.
+./scripts/install.sh
+```
+
+That's it. The script confirms the target context, applies the CRD, stores your
+keys as Kubernetes Secrets (never in Helm values/history), and rolls out the
+control plane. It prints the admin URL and password when done.
+
+Or deploy non-interactively from a gitignored secrets file:
+
+```bash
+# .secrets.env  (never committed)
+#   SLACK_APP_TOKEN=xapp-...
+#   SLACK_BOT_TOKEN=xoxb-...
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   ADMIN_PASSWORD=...          # optional; admin dashboard basic-auth
+./scripts/deploy-secrets.sh
+```
 
 > Standing up a fresh **GKE Autopilot** cluster end-to-end (cluster, registry,
 > images, HTTPS Ingress, secrets)? See **[`docs/deploy-gke.md`](docs/deploy-gke.md)**.
 
-```bash
-# Point at your registry + pick a tag.
-export REGISTRY=ghcr.io/your-org           # or REGION-docker.pkg.dev/PROJECT/REPO
-export TAG=$(git rev-parse --short HEAD)
-
-# 1. Build + push the images. (CI does this on every change —
-#    .github/workflows/build-push.yml — or build them directly:)
-docker buildx build --platform linux/amd64 -f Dockerfile             -t $REGISTRY/claw-controller:$TAG  --push .
-docker buildx build --platform linux/amd64 -f Dockerfile.runner-bash -t $REGISTRY/claw-runner-bash:$TAG --push .
-docker buildx build --platform linux/amd64 -f images/gcloud/Dockerfile -t $REGISTRY/claw-gcloud:$TAG     --push .
-
-# 2. CRD + namespaces (Helm does NOT upgrade CRDs from crds/, so apply with kubectl).
-kubectl apply -f charts/claw-crds/crds/
-kubectl create namespace claw-system
-kubectl create namespace claw-agents
-
-# 3. Secrets (out-of-band — never in Helm values).
-for ns in claw-agents claw-system; do
-  kubectl -n $ns create secret generic claw-anthropic-key --from-literal=api-key="$ANTHROPIC_API_KEY"
-done
-kubectl -n claw-system create secret generic claw-slack-tokens \
-  --from-literal=app-token="$SLACK_APP_TOKEN" --from-literal=bot-token="$SLACK_BOT_TOKEN"
-kubectl -n claw-system create secret generic claw-admin --from-literal=password="$ADMIN_PASSWORD"  # admin UI
-
-# 4. Install the control plane.
-helm upgrade --install claw ./charts/claw -n claw-system \
-  --set image.repository=$REGISTRY/claw-controller --set image.tag=$TAG \
-  --set controller.runnerImage=$REGISTRY/claw-runner-bash:$TAG \
-  --set slack.enabled=true
-kubectl -n claw-system rollout status statefulset/claw-controller
-
-# 5. Register a base image + an agent (via a port-forward to the controller API).
-kubectl -n claw-system port-forward svc/claw-controller 8443:8443 &
-export CLAW_CONTROLLER_URL=http://localhost:8443
-claw baseimage create default --image $REGISTRY/claw-runner-bash:$TAG \
-  --description "generic shell base (bash, curl)"
-claw agent create assistant --base default \
-  --system-prompt "You are a helpful assistant working in an isolated sandboxed container."
-```
-
-**Admin UI:** `kubectl -n claw-system port-forward svc/claw-controller 8443:8443`, then
-http://localhost:8443/ui (basic auth: `admin` / your `claw-admin` password). For an
-HTTPS Ingress so secret-intake links work without a port-forward, see
-[`docs/deploy-gke.md`](docs/deploy-gke.md).
+> Want to run a custom controller/runner or a new agent base image? See
+> [Advanced: building a custom image](#advanced-building-a-custom-image).
 
 ### Slack app setup
 
@@ -269,6 +248,72 @@ behind a port-forward today — add auth + TLS before exposing it.
 Two Helm charts: `charts/claw-crds` (the CRD) and `charts/claw` (the control plane).
 Note: Helm does not upgrade CRDs from `crds/` — `scripts/install.sh` applies the CRD
 with `kubectl` so install **and** upgrade work.
+
+**Images.** The chart defaults to the published Docker Hub images
+(`docker.io/bitwavecode/claw-controller` + `claw-runner`, tag `latest`). Pin a tag
+with `IMAGE_TAG=v0.2.0 ./scripts/install.sh`, or point at your own registry with the
+`IMAGE_REPO` / `RUNNER_IMAGE` env vars (see below).
+
+---
+
+## Advanced: building a custom image
+
+The quickstart uses prebuilt images. Build your own when you want to run a modified
+controller/runner, or add a new agent **base image** (extra CLIs/tooling).
+
+### Image layout
+
+| Dockerfile | Image | Role |
+|---|---|---|
+| `Dockerfile` | `claw-controller` | control plane |
+| `Dockerfile.runner` | `claw-runner` | distroless agent loop (no shell) |
+| `Dockerfile.runner-bash` | `claw-runner-bash` | generic base: bash + curl + CA certs |
+| `images/gcloud/Dockerfile` | `claw-gcloud` | base image: Google Cloud SDK (`gcloud`, `bq`) |
+| `images/aws/Dockerfile` | `claw-aws` | base image: AWS CLI v2 |
+| `images/azure/Dockerfile` | `claw-azure` | base image: Azure CLI (`az`) |
+
+A **base image** bundles the claw bootstrap + runner with whatever CLIs an agent's
+`bash` tool needs. Copy `images/gcloud/Dockerfile` as a template for a new one.
+
+### Build + push to your registry
+
+Prod nodes are typically amd64, so build for `linux/amd64`:
+
+```bash
+REG=docker.io/yourname   # or ghcr.io/yourorg, REGION-docker.pkg.dev/PROJECT/REPO
+
+docker buildx build --platform linux/amd64 -f Dockerfile          -t $REG/claw-controller:dev --push .
+docker buildx build --platform linux/amd64 -f Dockerfile.runner   -t $REG/claw-runner:dev     --push .
+docker buildx build --platform linux/amd64 -f images/gcloud/Dockerfile -t $REG/claw-gcloud:dev --push .
+```
+
+Install against your images:
+
+```bash
+IMAGE_REPO=$REG/claw-controller IMAGE_TAG=dev \
+RUNNER_IMAGE=$REG/claw-runner:dev ./scripts/install.sh
+```
+
+Register a custom **base image** so agents can reference it (CLI or the admin UI):
+
+```bash
+claw baseimage create gcloud --image $REG/claw-gcloud:dev \
+  --description "Google Cloud SDK (gcloud, bq) — GCP cost/billing queries"
+```
+
+### Local cluster from source (k3d)
+
+No registry needed — build locally and import into a k3d node:
+
+```bash
+k3d cluster create claw-dev
+make images                         # builds claw-controller:dev + claw-runner:dev locally
+k3d image import claw-controller:dev claw-runner:dev -c claw-dev
+IMAGE_REPO=claw-controller IMAGE_TAG=dev RUNNER_IMAGE=claw-runner:dev ./scripts/install.sh
+```
+
+GKE Artifact Registry users: `scripts/build-push-gke.sh` builds + pushes to GAR and
+prints the matching Helm values.
 
 ---
 
