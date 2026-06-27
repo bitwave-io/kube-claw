@@ -8,6 +8,13 @@ Placeholders used throughout: `PROJECT` (GCP project id), `REGION` (e.g.
 `us-central1`), `REPO` (Artifact Registry repo name, e.g. `claw`), `TAG` (image
 tag, e.g. a git short SHA), `HOST` (the intake UI hostname, e.g. `claw.example.com`).
 
+> **One command:** once you have a cluster and `kubectl` is pointed at it (step 1),
+> `./scripts/deploy-gke.sh` runs the whole flow interactively — it prompts for the
+> project/region/repo/tag/host, optionally creates the Artifact Registry repo + the
+> Ingress static IP, builds + pushes the images, gathers the secrets, and installs
+> the chart with `values-gke.yaml`. The manual steps below are the reference it
+> automates.
+
 ## 1. Cluster + registry
 
 ```bash
