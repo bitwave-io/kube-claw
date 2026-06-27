@@ -18,7 +18,7 @@ value never enters the model's context or the logs.
 
 **Prerequisites:** an authenticated `kubectl` pointed at any cluster, `helm`, and a
 Slack app + Anthropic API key. No Docker build — the install pulls published images
-from Docker Hub (`docker.io/bitwavecode/claw-*`).
+from Docker Hub (`docker.io/bitwavecode/kube-claw-*`).
 
 ```bash
 # Installs onto your CURRENT kubectl context.
@@ -250,9 +250,9 @@ Note: Helm does not upgrade CRDs from `crds/` — `scripts/install.sh` applies t
 with `kubectl` so install **and** upgrade work.
 
 **Images.** The chart defaults to the published Docker Hub images
-(`docker.io/bitwavecode/claw-controller` + `claw-runner`, tag `latest`). Pin a tag
-with `IMAGE_TAG=v0.2.0 ./scripts/install.sh`, or point at your own registry with the
-`IMAGE_REPO` / `RUNNER_IMAGE` env vars (see below).
+(`docker.io/bitwavecode/kube-claw-controller` + `kube-claw-runner`, tag `latest`).
+Pin a tag with `IMAGE_TAG=v0.2.0 ./scripts/install.sh`, or point at your own registry
+with the `IMAGE_REPO` / `RUNNER_IMAGE` env vars (see below).
 
 ---
 
@@ -265,12 +265,12 @@ controller/runner, or add a new agent **base image** (extra CLIs/tooling).
 
 | Dockerfile | Image | Role |
 |---|---|---|
-| `Dockerfile` | `claw-controller` | control plane |
-| `Dockerfile.runner` | `claw-runner` | distroless agent loop (no shell) |
-| `Dockerfile.runner-bash` | `claw-runner-bash` | generic base: bash + curl + CA certs |
-| `images/gcloud/Dockerfile` | `claw-gcloud` | base image: Google Cloud SDK (`gcloud`, `bq`) |
-| `images/aws/Dockerfile` | `claw-aws` | base image: AWS CLI v2 |
-| `images/azure/Dockerfile` | `claw-azure` | base image: Azure CLI (`az`) |
+| `Dockerfile` | `kube-claw-controller` | control plane |
+| `Dockerfile.runner` | `kube-claw-runner` | distroless agent loop (no shell) |
+| `Dockerfile.runner-bash` | `kube-claw-runner-bash` | generic base: bash + curl + CA certs |
+| `images/gcloud/Dockerfile` | `kube-claw-gcloud` | base image: Google Cloud SDK (`gcloud`, `bq`) |
+| `images/aws/Dockerfile` | `kube-claw-aws` | base image: AWS CLI v2 |
+| `images/azure/Dockerfile` | `kube-claw-azure` | base image: Azure CLI (`az`) |
 
 A **base image** bundles the claw bootstrap + runner with whatever CLIs an agent's
 `bash` tool needs. Copy `images/gcloud/Dockerfile` as a template for a new one.
@@ -282,22 +282,22 @@ Prod nodes are typically amd64, so build for `linux/amd64`:
 ```bash
 REG=docker.io/yourname   # or ghcr.io/yourorg, REGION-docker.pkg.dev/PROJECT/REPO
 
-docker buildx build --platform linux/amd64 -f Dockerfile          -t $REG/claw-controller:dev --push .
-docker buildx build --platform linux/amd64 -f Dockerfile.runner   -t $REG/claw-runner:dev     --push .
-docker buildx build --platform linux/amd64 -f images/gcloud/Dockerfile -t $REG/claw-gcloud:dev --push .
+docker buildx build --platform linux/amd64 -f Dockerfile          -t $REG/kube-claw-controller:dev --push .
+docker buildx build --platform linux/amd64 -f Dockerfile.runner   -t $REG/kube-claw-runner:dev     --push .
+docker buildx build --platform linux/amd64 -f images/gcloud/Dockerfile -t $REG/kube-claw-gcloud:dev --push .
 ```
 
 Install against your images:
 
 ```bash
-IMAGE_REPO=$REG/claw-controller IMAGE_TAG=dev \
-RUNNER_IMAGE=$REG/claw-runner:dev ./scripts/install.sh
+IMAGE_REPO=$REG/kube-claw-controller IMAGE_TAG=dev \
+RUNNER_IMAGE=$REG/kube-claw-runner:dev ./scripts/install.sh
 ```
 
 Register a custom **base image** so agents can reference it (CLI or the admin UI):
 
 ```bash
-claw baseimage create gcloud --image $REG/claw-gcloud:dev \
+claw baseimage create gcloud --image $REG/kube-claw-gcloud:dev \
   --description "Google Cloud SDK (gcloud, bq) — GCP cost/billing queries"
 ```
 
@@ -307,9 +307,9 @@ No registry needed — build locally and import into a k3d node:
 
 ```bash
 k3d cluster create claw-dev
-make images                         # builds claw-controller:dev + claw-runner:dev locally
-k3d image import claw-controller:dev claw-runner:dev -c claw-dev
-IMAGE_REPO=claw-controller IMAGE_TAG=dev RUNNER_IMAGE=claw-runner:dev ./scripts/install.sh
+make images                         # builds kube-claw-controller:dev + kube-claw-runner:dev locally
+k3d image import kube-claw-controller:dev kube-claw-runner:dev -c claw-dev
+IMAGE_REPO=kube-claw-controller IMAGE_TAG=dev RUNNER_IMAGE=kube-claw-runner:dev ./scripts/install.sh
 ```
 
 GKE Artifact Registry users: `scripts/build-push-gke.sh` builds + pushes to GAR and

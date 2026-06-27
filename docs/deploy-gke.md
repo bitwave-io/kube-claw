@@ -26,7 +26,7 @@ gcloud auth configure-docker REGION-docker.pkg.dev
 
 ```bash
 PROJECT=PROJECT REGION=REGION REPO=REPO TAG=TAG ./scripts/build-push-gke.sh
-# builds + pushes claw-controller, claw-runner, claw-gcloud (set IMAGES= to add aws/azure)
+# builds + pushes kube-claw-controller, kube-claw-runner, kube-claw-gcloud (set IMAGES= to add aws/azure)
 ```
 
 ## 3. Namespaces, CRD, RBAC
@@ -62,9 +62,9 @@ and TLS provisions), then:
 ```bash
 helm upgrade --install claw ./charts/claw -n claw-system \
   -f charts/claw/values-gke.yaml \
-  --set image.repository=REGION-docker.pkg.dev/PROJECT/REPO/claw-controller \
+  --set image.repository=REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-controller \
   --set image.tag=TAG \
-  --set controller.runnerImage=REGION-docker.pkg.dev/PROJECT/REPO/claw-runner:TAG \
+  --set controller.runnerImage=REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-runner:TAG \
   --set controller.uiBaseURL=https://HOST \
   --set ui.ingress.host=HOST
 
@@ -81,7 +81,7 @@ kubectl -n claw-system port-forward svc/claw-controller 8443:8443 &
 export CLAW_CONTROLLER_URL=http://localhost:8443
 
 claw baseimage create gcloud \
-  --image REGION-docker.pkg.dev/PROJECT/REPO/claw-gcloud:TAG \
+  --image REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-gcloud:TAG \
   --description "Google Cloud SDK (gcloud, bq) — GCP cost/billing queries"
 
 claw agent create gcp-cost --base gcloud \

@@ -1,8 +1,8 @@
 # GKE Autopilot overlay for the claw control plane.
 #   helm upgrade --install claw ./charts/claw -n claw-system -f charts/claw/values-gke.yaml \
-#     --set image.repository=REGION-docker.pkg.dev/PROJECT/REPO/claw-controller \
+#     --set image.repository=REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-controller \
 #     --set image.tag=TAG \
-#     --set controller.runnerImage=REGION-docker.pkg.dev/PROJECT/REPO/claw-runner:TAG \
+#     --set controller.runnerImage=REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-runner:TAG \
 #     --set controller.uiBaseURL=https://claw.example.com \
 #     --set ui.ingress.host=claw.example.com
 #
@@ -10,12 +10,12 @@
 # (above) so this file stays free of environment-specific values.
 
 image:
-  repository: REGION-docker.pkg.dev/PROJECT/REPO/claw-controller
+  repository: REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-controller
   tag: TAG
   pullPolicy: Always # prod: always pull the pinned tag from Artifact Registry
 
 controller:
-  runnerImage: REGION-docker.pkg.dev/PROJECT/REPO/claw-runner:TAG
+  runnerImage: REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-runner:TAG
   # Public HTTPS URL of the intake UI (the Ingress host) — used in secret links.
   uiBaseURL: https://claw.example.com
   # Admin dashboard basic-auth password is read from this secret (key "password").

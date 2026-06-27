@@ -1,6 +1,6 @@
 name: build-push
 
-# Build + push the kube-claw images to Docker Hub (docker.io/bitwavecode/claw-*).
+# Build + push the kube-claw images to Docker Hub (docker.io/bitwavecode/kube-claw-*).
 #
 # Triggers only when the image build inputs change (the Dockerfiles AND the Go
 # source/modules they compile in — a Dockerfile-only filter would ship stale
@@ -58,13 +58,13 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: docker.io/${{ env.NAMESPACE }}/claw-${{ matrix.name }}
+          images: docker.io/${{ env.NAMESPACE }}/kube-claw-${{ matrix.name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
             type=semver,pattern={{version}}
 
-      - name: Build + push claw-${{ matrix.name }}
+      - name: Build + push kube-claw-${{ matrix.name }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -73,5 +73,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=claw-${{ matrix.name }}
-          cache-to: type=gha,scope=claw-${{ matrix.name }},mode=max
+          cache-from: type=gha,scope=kube-claw-${{ matrix.name }}
+          cache-to: type=gha,scope=kube-claw-${{ matrix.name }},mode=max

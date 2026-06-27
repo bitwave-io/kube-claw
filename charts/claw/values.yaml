@@ -1,5 +1,5 @@
 image:
-  repository: docker.io/bitwavecode/claw-controller
+  repository: docker.io/bitwavecode/kube-claw-controller
   tag: latest
   pullPolicy: IfNotPresent
 
@@ -10,7 +10,7 @@ controller:
   dataDir: /var/lib/claw
   enableRouter: true
   # Image the run engine launches for each run Job (DESIGN.md §11).
-  runnerImage: docker.io/bitwavecode/claw-runner:latest
+  runnerImage: docker.io/bitwavecode/kube-claw-runner:latest
   # Admin dashboard (/ui) basic-auth password is read from this Secret (key
   # "password", user "admin"). Absent secret/key => the admin UI is unauthenticated.
   # scripts/install.sh creates it; create out-of-band otherwise.

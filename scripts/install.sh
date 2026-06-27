@@ -21,9 +21,9 @@ set -euo pipefail
 
 NS="${NS:-claw-system}"
 AGENTS_NS="${AGENTS_NS:-claw-agents}"
-IMAGE_REPO="${IMAGE_REPO:-docker.io/bitwavecode/claw-controller}"
+IMAGE_REPO="${IMAGE_REPO:-docker.io/bitwavecode/kube-claw-controller}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-RUNNER_IMAGE="${RUNNER_IMAGE:-docker.io/bitwavecode/claw-runner:${IMAGE_TAG}}"
+RUNNER_IMAGE="${RUNNER_IMAGE:-docker.io/bitwavecode/kube-claw-runner:${IMAGE_TAG}}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # --- preflight ---------------------------------------------------------------

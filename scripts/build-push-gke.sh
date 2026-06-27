@@ -25,8 +25,8 @@ PLATFORM="linux/amd64"
 echo "Pushing to ${REGISTRY} (tag ${TAG}, platform ${PLATFORM})"
 
 build() { # name dockerfile
-  local name="$1" dockerfile="$2" ref="${REGISTRY}/claw-${1}:${TAG}"
-  echo "==> claw-${name}  (${dockerfile})"
+  local name="$1" dockerfile="$2" ref="${REGISTRY}/kube-claw-${1}:${TAG}"
+  echo "==> kube-claw-${name}  (${dockerfile})"
   docker buildx build --platform "${PLATFORM}" -f "${dockerfile}" -t "${ref}" --push .
   echo "    pushed ${ref}"
 }
@@ -45,11 +45,11 @@ done
 cat <<EOF
 
 Done. Reference these in Helm values-gke.yaml (or --set):
-  image.repository = ${REGISTRY}/claw-controller
+  image.repository = ${REGISTRY}/kube-claw-controller
   image.tag        = ${TAG}
-  controller.runnerImage = ${REGISTRY}/claw-runner:${TAG}
+  controller.runnerImage = ${REGISTRY}/kube-claw-runner:${TAG}
 
 Register the gcloud base image after install:
-  claw baseimage create gcloud --image ${REGISTRY}/claw-gcloud:${TAG} \\
+  claw baseimage create gcloud --image ${REGISTRY}/kube-claw-gcloud:${TAG} \\
     --description "Google Cloud SDK (gcloud, bq) — GCP cost/billing queries"
 EOF

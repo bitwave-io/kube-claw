@@ -74,7 +74,7 @@ func (s *Server) baseImagesPage(w http.ResponseWriter, r *http.Request) {
 <h2>Register a base image</h2>
 <form method=post action=/ui/base-images style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:1rem;max-width:660px">
 <label>Name</label><br><input name=name required placeholder="e.g. default, gcloud, aws" style="width:100%"><br><br>
-<label>Image</label><br><input name=image required placeholder="REGION-docker.pkg.dev/PROJECT/REPO/claw-runner-bash:TAG" style="width:100%"><br><br>
+<label>Image</label><br><input name=image required placeholder="REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-runner-bash:TAG" style="width:100%"><br><br>
 <label>When to use</label><br><input name=description style="width:100%" placeholder="generic shell base (bash, curl); or 'Google Cloud SDK — GCP/billing queries'"><br><br>
 <button>Register</button>
 </form>`

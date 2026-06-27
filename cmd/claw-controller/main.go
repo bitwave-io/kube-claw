@@ -49,7 +49,7 @@ func main() {
 	flag.StringVar(&apiAddr, "api-bind-address", ":8443", "HTTP API bind address")
 	flag.StringVar(&uiAddr, "ui-bind-address", ":8090", "secret-intake UI bind address (separate listener)")
 	flag.StringVar(&uiBaseURL, "ui-base-url", "http://localhost:8090", "public base URL of the intake UI (for returned links)")
-	flag.StringVar(&runnerImage, "runner-image", "claw-runner:dev", "image used for agent run Jobs")
+	flag.StringVar(&runnerImage, "runner-image", "kube-claw-runner:dev", "image used for agent run Jobs")
 	flag.StringVar(&selfURL, "self-url", "http://claw-controller.claw-system.svc:8443", "in-cluster URL run pods use to reach the controller")
 	flag.StringVar(&anthropicSecret, "anthropic-secret", "claw-anthropic-key", "K8s secret (key \"api-key\") injected into run pods for the agent loop")
 	flag.StringVar(&defaultAgent, "default-agent", "assistant", "agent assigned when a Slack channel is onboarded")

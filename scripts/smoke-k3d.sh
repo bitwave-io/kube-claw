@@ -38,16 +38,17 @@ case "$CTX" in
 esac
 
 # 2. Build + import images.
-docker build -q -t claw-controller:dev .
-docker build -q -f Dockerfile.runner -t claw-runner:dev .
-k3d image import claw-controller:dev claw-runner:dev -c "$CLUSTER"
+docker build -q -t kube-claw-controller:dev .
+docker build -q -f Dockerfile.runner -t kube-claw-runner:dev .
+k3d image import kube-claw-controller:dev kube-claw-runner:dev -c "$CLUSTER"
 
 # 3. Install/upgrade charts.
 helm upgrade --install claw-crds ./charts/claw-crds
 kubectl create namespace claw-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace claw-agents --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install claw ./charts/claw -n claw-system \
-  --set image.repository=claw-controller --set image.tag=dev --set image.pullPolicy=IfNotPresent
+  --set image.repository=kube-claw-controller --set image.tag=dev --set image.pullPolicy=IfNotPresent \
+  --set controller.runnerImage=kube-claw-runner:dev
 kubectl -n claw-system rollout restart statefulset/claw-controller
 kubectl -n claw-system rollout status statefulset/claw-controller --timeout=120s
 

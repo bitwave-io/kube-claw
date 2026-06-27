@@ -39,8 +39,8 @@ build: generate
 IMAGE_TAG ?= dev
 .PHONY: images
 images:
-	docker build -f Dockerfile        -t claw-controller:$(IMAGE_TAG) .
-	docker build -f Dockerfile.runner -t claw-runner:$(IMAGE_TAG) .
+	docker build -f Dockerfile        -t kube-claw-controller:$(IMAGE_TAG) .
+	docker build -f Dockerfile.runner -t kube-claw-runner:$(IMAGE_TAG) .
 
 .PHONY: fmt
 fmt:
