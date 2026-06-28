@@ -17,7 +17,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 FROM mcr.microsoft.com/azure-cli:latest
 COPY --from=build /out/claw-runner /claw/runner
 COPY --from=build /out/claw-bootstrap /claw/bootstrap
-RUN useradd -u 65532 -m -d /home/nonroot nonroot
+# azure-cli's base lacks useradd. The pod's RunAsUser=65532 is authoritative, so
+# we don't need a passwd entry — just a writable home dir for the uid to land in.
+RUN mkdir -p /home/nonroot && chmod 0777 /home/nonroot
 ENV HOME=/home/nonroot AZURE_CONFIG_DIR=/var/run/claw/secrets/.azure
 USER 65532:65532
 ENTRYPOINT ["/claw/bootstrap", "/claw/runner"]

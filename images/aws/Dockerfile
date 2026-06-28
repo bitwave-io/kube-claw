@@ -16,7 +16,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 FROM amazon/aws-cli:latest
 COPY --from=build /out/claw-runner /claw/runner
 COPY --from=build /out/claw-bootstrap /claw/bootstrap
-RUN useradd -u 65532 -m -d /home/nonroot nonroot
+# amazon/aws-cli is a minimal base without useradd. The pod's RunAsUser=65532 is
+# authoritative, so we don't need a passwd entry — just a writable home dir for
+# the uid to land in. (world-writable: the runtime uid owns nothing here yet.)
+RUN mkdir -p /home/nonroot && chmod 0777 /home/nonroot
 ENV HOME=/home/nonroot AWS_CONFIG_FILE=/var/run/claw/secrets/.aws/config
 USER 65532:65532
 # amazon/aws-cli sets ENTRYPOINT=aws; override to the claw bootstrap+runner.
