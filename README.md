@@ -378,7 +378,7 @@ use case); `aws`/`azure` base images built and published.
 
 ## License
 
-Copyright © 2026 Bitwave.
+Copyright © 2026 BitAlpha, Inc. (dba Bitwave).
 
 kube-claw is licensed under the **GNU Affero General Public License v3.0** (AGPLv3)
 — see [`LICENSE`](LICENSE). The AGPL is OSI-approved open source, and its §13
