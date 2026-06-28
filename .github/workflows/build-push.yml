@@ -35,6 +35,9 @@ jobs:
   build-push:
     runs-on: ubuntu-latest # amd64-native — no cross-build/emulation
     strategy:
+      # Publish each image independently — one image's build failing shouldn't
+      # cancel (and thus un-publish) the others.
+      fail-fast: false
       matrix:
         include:
           - name: controller
