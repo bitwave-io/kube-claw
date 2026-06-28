@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -444,10 +445,29 @@ func runBash(parent context.Context, cmd string) string {
 	defer cancel()
 	c := exec.CommandContext(ctx, "bash", "-lc", cmd)
 	c.Dir = "/workspace"
-	out, _ := c.CombinedOutput()
+	out, err := c.CombinedOutput()
 	s := strings.TrimSpace(string(out))
 	if len(s) > 8000 {
 		s = s[:8000] + "\n…(truncated)"
+	}
+	// Distinguish a command that genuinely printed nothing from one that never
+	// ran. If bash itself can't be started (e.g. missing from a minimal image),
+	// CombinedOutput returns an exec error with no output — surface that instead
+	// of a bare "(no output)", which reads like a wedged shell and sends the
+	// agent down a dead end.
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			// The command ran and exited non-zero. Its stderr is in out; include
+			// the exit status so the agent can react to failures.
+			status := fmt.Sprintf("(exit status %d)", ee.ExitCode())
+			if s == "" {
+				return status
+			}
+			return s + "\n" + status
+		}
+		// bash never launched (not found, timeout, etc.) — a real tooling problem.
+		return fmt.Sprintf("(command could not be run: %v)", err)
 	}
 	if s == "" {
 		s = "(no output)"

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/traego/kube-claw/internal/store"
 	"github.com/traego/kube-claw/internal/store/sqlite"
 )
 
@@ -44,5 +45,53 @@ func TestOnboardingSetsDynamicRoute(t *testing.T) {
 	}
 	if rt := r.resolveRoute(ctx, "C_MENTION", true); rt == nil {
 		t.Fatal("@-only channel did not route an @mention")
+	}
+}
+
+// An @mention in a channel the bot isn't in yet is dropped (no route), but must
+// be replayed once the channel is onboarded — otherwise the very first message
+// that summoned the bot is lost.
+func TestPendingMentionReplayedAfterOnboard(t *testing.T) {
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "claw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r := &Router{Store: st}
+
+	// @mention arrives before the channel is onboarded → no run, but stashed.
+	runID, err := r.HandleMessage(ctx, "1700000000.0001", "C_NEW", "1700000000.0001", "<@BOT> hello", true, "U1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runID != "" {
+		t.Fatalf("expected no run before onboarding, got %q", runID)
+	}
+	if _, ok := r.pending["C_NEW"]; !ok {
+		t.Fatal("expected the @mention to be stashed pending onboarding")
+	}
+
+	// Onboarding the channel should replay the stashed mention as a real run.
+	_ = r.HandleOnboard(ctx, onboardValue("C_NEW", "claw-agents", "assistant", true, true))
+	if _, ok := r.pending["C_NEW"]; ok {
+		t.Fatal("stashed mention should be consumed after onboarding")
+	}
+	var runs []store.Run
+	if err := st.Tx(ctx, func(tx store.Tx) error {
+		var e error
+		runs, e = tx.ListRunsBySession("1700000000.0001", 10)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run created from replayed mention, got %d", len(runs))
+	}
+	if runs[0].AgentName != "assistant" {
+		t.Fatalf("replayed run agent = %q, want assistant", runs[0].AgentName)
 	}
 }

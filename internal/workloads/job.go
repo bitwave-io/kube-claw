@@ -87,8 +87,16 @@ func buildJob(run store.Run, runnerImage string, env []corev1.EnvVar) *batchv1.J
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "claw-agent-" + run.AgentName,
 					RestartPolicy:      corev1.RestartPolicyNever,
+					// Run as the non-root agent user (uid 65532). FSGroup makes the
+					// EmptyDir volumes (incl. the tmpfs secrets dir) group-owned by
+					// that user so the runner can write materialized secrets into
+					// them — without it, the volumes are root-owned and the non-root
+					// process gets "permission denied" writing a fetched secret.
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot:   ptr(true),
+						RunAsUser:      ptr(int64(65532)),
+						RunAsGroup:     ptr(int64(65532)),
+						FSGroup:        ptr(int64(65532)),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					Containers: []corev1.Container{{
@@ -97,9 +105,14 @@ func buildJob(run store.Run, runnerImage string, env []corev1.EnvVar) *batchv1.J
 						// bootstrap performs /login + materialize, then execs the runner.
 						Command: []string{"/claw/bootstrap", "/claw/runner"},
 						Env:     env,
+						// The pod is the security boundary (non-root, dropped caps,
+						// seccomp, NetworkPolicy, ephemeral). The rootfs is writable so
+						// the agent's bash tool can install tooling into its home at
+						// runtime (pip --user, ~/.local/bin, …); apt still needs root
+						// and is unavailable.
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: ptr(false),
-							ReadOnlyRootFilesystem:   ptr(true),
+							ReadOnlyRootFilesystem:   ptr(false),
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 						},
 						Resources: corev1.ResourceRequirements{

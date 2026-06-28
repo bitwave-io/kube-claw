@@ -1,5 +1,15 @@
 # kube-claw default runner image. Built and pushed alongside the controller;
 # the run engine launches it as a one-shot Job (DESIGN.md §11, §36).
+#
+# This is the GENERAL-PURPOSE base: a real shell (bash) plus the common tools an
+# agent reaches for (curl, git, python3/pip, ca-certs), so the `bash` tool works
+# and the agent can install more into its own home at runtime. It runs NON-ROOT
+# (uid 65532); the pod sandbox (dropped caps, seccomp, NetworkPolicy, ephemeral
+# scale-to-zero pod) is the security boundary, not a read-only rootfs — so the
+# user can `pip install --user`, `npm i -g` into a user prefix, or drop binaries
+# into ~/.local/bin. System (apt) installs need root and are intentionally not
+# available; use a purpose-built base image (images/{gcloud,aws,azure}) when an
+# agent needs heavier pre-installed tooling.
 FROM golang:1.26 AS build
 WORKDIR /src
 ENV GOTOOLCHAIN=local
@@ -13,8 +23,18 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/claw-bootstrap ./cmd/claw-bootstrap
 
-FROM gcr.io/distroless/static:nonroot
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bash ca-certificates curl git jq python3 python3-pip python3-venv unzip \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/claw-runner /claw/runner
 COPY --from=build /out/claw-bootstrap /claw/bootstrap
+# Non-root user with a real, writable home so runtime user-local installs work
+# (pip --user, ~/.local/bin, language version managers, etc.).
+RUN useradd -u 65532 -m -d /home/nonroot -s /bin/bash nonroot
+ENV HOME=/home/nonroot \
+    PATH=/home/nonroot/.local/bin:/usr/local/bin:/usr/bin:/bin \
+    PIP_BREAK_SYSTEM_PACKAGES=1
 USER 65532:65532
-ENTRYPOINT ["/claw/runner"]
+# bootstrap performs /login + secret materialize, then execs the runner.
+ENTRYPOINT ["/claw/bootstrap", "/claw/runner"]

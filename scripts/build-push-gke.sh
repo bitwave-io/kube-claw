@@ -6,7 +6,7 @@
 #   PROJECT=my-gcp-project REGION=us-central1 REPO=claw TAG=v1 ./scripts/build-push-gke.sh
 #
 # Optional:
-#   IMAGES="controller runner gcloud aws azure"   # which to build (default: controller runner gcloud)
+#   IMAGES="controller runner gcloud aws azure"   # which to build (default: all)
 #
 # Prereqs: docker buildx, gcloud, and an Artifact Registry Docker repo:
 #   gcloud artifacts repositories create "$REPO" --repository-format=docker --location="$REGION"
@@ -17,7 +17,7 @@ set -euo pipefail
 : "${REGION:?set REGION, e.g. us-central1}"
 REPO="${REPO:-claw}"
 TAG="${TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo latest)}"
-IMAGES="${IMAGES:-controller runner gcloud}"
+IMAGES="${IMAGES:-controller runner gcloud aws azure}"
 
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
 PLATFORM="linux/amd64"
@@ -49,7 +49,10 @@ Done. Reference these in Helm values-gke.yaml (or --set):
   image.tag        = ${TAG}
   controller.runnerImage = ${REGISTRY}/kube-claw-runner:${TAG}
 
-Register the gcloud base image after install:
-  claw baseimage create gcloud --image ${REGISTRY}/kube-claw-gcloud:${TAG} \\
-    --description "Google Cloud SDK (gcloud, bq) — GCP cost/billing queries"
+The controller auto-registers the gcloud/aws/azure base images on startup,
+deriving their refs from runnerImage (same registry + tag). Point an agent at one
+with:  spec.baseImageRef: gcloud   (or aws / azure)
+
+If your images don't follow the kube-claw-<name> naming, override the refs with
+the controller flag --cloud-base-images="gcloud=REF,aws=REF,azure=REF".
 EOF

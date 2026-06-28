@@ -45,6 +45,10 @@ jobs:
             dockerfile: Dockerfile.runner-bash
           - name: gcloud
             dockerfile: images/gcloud/Dockerfile
+          - name: aws
+            dockerfile: images/aws/Dockerfile
+          - name: azure
+            dockerfile: images/azure/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

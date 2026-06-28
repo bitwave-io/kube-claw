@@ -42,6 +42,14 @@ images:
 	docker build -f Dockerfile        -t kube-claw-controller:$(IMAGE_TAG) .
 	docker build -f Dockerfile.runner -t kube-claw-runner:$(IMAGE_TAG) .
 
+# Cloud base images (gcloud/aws/azure). Large; not needed for most local dev, so
+# kept out of `images`. The controller auto-registers these by name on startup.
+.PHONY: cloud-images
+cloud-images:
+	docker build -f images/gcloud/Dockerfile -t kube-claw-gcloud:$(IMAGE_TAG) .
+	docker build -f images/aws/Dockerfile    -t kube-claw-aws:$(IMAGE_TAG) .
+	docker build -f images/azure/Dockerfile  -t kube-claw-azure:$(IMAGE_TAG) .
+
 .PHONY: fmt
 fmt:
 	go fmt ./...

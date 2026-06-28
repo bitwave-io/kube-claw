@@ -14,10 +14,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/traego/kube-claw/internal/approvals"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Route maps a Slack channel (with optional mention requirement) to an agent.
@@ -62,6 +64,20 @@ type Router struct {
 	AgentsNS     string                          // namespace for onboarded agents (default claw-agents)
 	Classifier   *Classifier                     // LLM agent router (nil = use the channel's agent)
 	AgentLister  func(context.Context) []AgentChoice // lists routable agents (injected; reads the CRDs)
+
+	mu      sync.Mutex                // guards pending
+	pending map[string]pendingMention // channel id → the @mention that arrived before onboarding
+}
+
+// pendingMention is an @mention the bot received in a channel it had no route
+// for yet (i.e. before it was added + onboarded). We stash it and replay it once
+// onboarding completes, so the very first message that summoned the bot isn't
+// silently dropped.
+type pendingMention struct {
+	eventID   string
+	sessionID string
+	text      string
+	user      string
 }
 
 // pickAgent runs the classifier (if configured) over the available agents and
@@ -114,6 +130,28 @@ func b2i(b bool) int {
 	return 0
 }
 
+// stashPending remembers the @mention that summoned the bot to a channel it has
+// no route for yet, keyed by channel (last one wins). Replayed by HandleOnboard.
+func (r *Router) stashPending(channel string, m pendingMention) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending == nil {
+		r.pending = make(map[string]pendingMention)
+	}
+	r.pending[channel] = m
+}
+
+// takePending removes and returns the stashed mention for a channel, if any.
+func (r *Router) takePending(channel string) (pendingMention, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m, ok := r.pending[channel]
+	if ok {
+		delete(r.pending, channel)
+	}
+	return m, ok
+}
+
 // HandleOnboard applies an onboarding choice (a channel preset) and returns a
 // confirmation message. Value format from onboardValue.
 func (r *Router) HandleOnboard(ctx context.Context, value string) string {
@@ -130,6 +168,16 @@ func (r *Router) HandleOnboard(ctx context.Context, value string) string {
 		})
 	}); err != nil {
 		return "couldn't save: " + err.Error()
+	}
+	// Now that the channel is routable, replay the @mention that summoned the bot
+	// here (the one that arrived before onboarding and was dropped).
+	if m, ok := r.takePending(channel); ok {
+		if runID, err := r.HandleMessage(ctx, m.eventID, channel, m.sessionID, m.text, true, m.user); err != nil {
+			logf.Log.WithName("slack").Error(err, "replay pending mention", "channel", channel)
+		} else if runID != "" {
+			logf.Log.WithName("slack").Info("replayed pending mention after onboarding", "run", runID, "channel", channel)
+			r.react(ctx, channel, m.eventID)
+		}
 	}
 	watch := "every message"
 	if mention {
@@ -189,6 +237,12 @@ func parseRegisterSecret(text string) (name, description string) {
 func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID, text string, mentioned bool, user string) (string, error) {
 	route := r.resolveRoute(ctx, channel, mentioned)
 	if route == nil {
+		// No route yet. If this was an @mention, the bot was likely summoned to a
+		// channel it isn't in: stash it so onboarding can replay it (otherwise the
+		// first message is lost). Plain unmatched chatter is still ignored.
+		if mentioned {
+			r.stashPending(channel, pendingMention{eventID: eventID, sessionID: sessionID, text: text, user: user})
+		}
 		return "", nil
 	}
 	// New session → let the router pick the best-fit agent (it carries its own

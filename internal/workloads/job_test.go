@@ -51,9 +51,32 @@ func TestBuildRunJob(t *testing.T) {
 	if env["CLAW_CONTROLLER_URL"] == "" {
 		t.Error("CLAW_CONTROLLER_URL not set")
 	}
-	// Security baseline.
+	// Security baseline: non-root, no privilege escalation, all caps dropped. The
+	// rootfs is writable (so the agent can install tooling at runtime) — the pod
+	// sandbox is the boundary, not a read-only fs.
 	sc := pod.Containers[0].SecurityContext
-	if sc == nil || sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem {
-		t.Error("expected readOnlyRootFilesystem=true")
+	if sc == nil {
+		t.Fatal("expected a container SecurityContext")
+	}
+	if sc.ReadOnlyRootFilesystem == nil || *sc.ReadOnlyRootFilesystem {
+		t.Error("expected readOnlyRootFilesystem=false (writable rootfs for runtime installs)")
+	}
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		t.Error("expected allowPrivilegeEscalation=false")
+	}
+	if sc.Capabilities == nil || len(sc.Capabilities.Drop) == 0 || sc.Capabilities.Drop[0] != "ALL" {
+		t.Error("expected all capabilities dropped")
+	}
+	// Pod-level: non-root with an explicit uid + matching FSGroup so EmptyDir
+	// volumes (incl. the tmpfs secrets dir) are writable by the agent user.
+	psc := pod.SecurityContext
+	if psc == nil || psc.RunAsNonRoot == nil || !*psc.RunAsNonRoot {
+		t.Error("expected runAsNonRoot=true")
+	}
+	if psc == nil || psc.RunAsUser == nil || *psc.RunAsUser != 65532 {
+		t.Error("expected runAsUser=65532")
+	}
+	if psc == nil || psc.FSGroup == nil || *psc.FSGroup != 65532 {
+		t.Error("expected fsGroup=65532 so the secrets volume is writable")
 	}
 }
