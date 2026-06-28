@@ -100,6 +100,16 @@ ui_args=()
 read -rp "Public UI base URL for secret links [http://localhost:8090]: " uiurl
 if [[ -n "$uiurl" ]]; then
   ui_args=(--set controller.uiBaseURL="$uiurl")
+  # This URL is only a link label — install.sh does NOT provision an Ingress or a
+  # public IP (it's the portable, any-cluster path; the controller Service stays
+  # ClusterIP). A non-localhost URL here resolves nowhere unless you set up
+  # ingress separately. Flag it so the host isn't silently a dead link.
+  if [[ "$uiurl" != http://localhost* && "$uiurl" != http://127.0.0.1* ]]; then
+    echo "  NOTE: install.sh does not set up an Ingress for '$uiurl'. The Service"
+    echo "        is ClusterIP (in-cluster only), so there's no IP to point DNS at."
+    echo "        For a public HTTPS endpoint + static IP + managed TLS on GKE, use"
+    echo "        scripts/deploy-gke.sh. Otherwise reach the UI via port-forward."
+  fi
 fi
 
 # --- install -----------------------------------------------------------------

@@ -79,8 +79,12 @@ if [[ "$mk" =~ ^[Yy] ]]; then
   gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 fi
 
-read -rp "Reserve a global static IP named '$STATIC_IP_NAME' for the Ingress? [y/N] " mkip
-if [[ "$mkip" =~ ^[Yy] ]]; then
+# The GKE overlay enables the Ingress, which needs a global static IP to give you
+# a stable DNS target — so reserve it by default (the create is idempotent). The
+# resulting IP is captured and re-printed in the final "Next" steps so it's not
+# missed mid-run. Decline only if you manage the IP out-of-band.
+read -rp "Reserve a global static IP named '$STATIC_IP_NAME' for the Ingress? [Y/n] " mkip
+if [[ ! "$mkip" =~ ^[Nn] ]]; then
   gcloud compute addresses create "$STATIC_IP_NAME" --global --project "$PROJECT" 2>/dev/null \
     && echo "  created static IP $STATIC_IP_NAME" || echo "  static IP $STATIC_IP_NAME already exists"
   IP="$(gcloud compute addresses describe "$STATIC_IP_NAME" --global --project "$PROJECT" \
@@ -159,9 +163,22 @@ echo "Done. kube-claw is deployed to '$NS' on context '$CTX'."
 if [[ -n "${GENERATED_ADMIN:-}" ]]; then
   echo "  Admin password (user 'admin'): $GENERATED_ADMIN"
 fi
+# Re-resolve the IP in case reservation was skipped this run (e.g. reserved on a
+# prior run) so the DNS instruction always shows a concrete address when one exists.
+if [[ -z "${IP:-}" ]]; then
+  IP="$(gcloud compute addresses describe "$STATIC_IP_NAME" --global --project "$PROJECT" \
+    --format='value(address)' 2>/dev/null || true)"
+fi
+
 echo
 echo "Next:"
-echo "  - Point $UI_HOST DNS A record at the static IP (gcloud compute addresses describe $STATIC_IP_NAME --global)."
+if [[ -n "${IP:-}" ]]; then
+  echo "  - Point $UI_HOST DNS A record at: $IP"
+else
+  echo "  - Reserve a static IP and point $UI_HOST DNS A record at it:"
+  echo "      gcloud compute addresses create $STATIC_IP_NAME --global --project $PROJECT"
+  echo "      gcloud compute addresses describe $STATIC_IP_NAME --global --project $PROJECT --format='value(address)'"
+fi
 echo "  - Watch the Ingress + managed cert (Status -> Active can take ~15 min):"
 echo "      kubectl -n $NS get ingress"
 echo "      kubectl -n $NS describe managedcertificate"
