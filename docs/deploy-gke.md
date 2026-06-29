@@ -43,7 +43,7 @@ kubectl create namespace claw-system
 kubectl create namespace claw-agents
 
 # Helm does NOT upgrade CRDs from crds/ — apply with kubectl so upgrades work too.
-kubectl apply -f charts/claw-crds/crds/
+kubectl apply -f charts/crds/
 ```
 
 ## 4. Secrets (out-of-band — never in Helm values)

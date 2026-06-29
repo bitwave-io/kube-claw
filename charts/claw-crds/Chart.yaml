@@ -1,6 +1,0 @@
-apiVersion: v2
-name: claw-crds
-description: kube-claw CustomResourceDefinitions (Agent)
-type: application
-version: 0.1.1
-appVersion: "0.2.1"

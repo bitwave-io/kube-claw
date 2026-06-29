@@ -118,7 +118,7 @@ Two Helm charts:
 
 ```text
 charts/
-  claw-crds/         crds/agent.yaml          # the ONE CRD
+  crds/              claw.run_agents.yaml     # the ONE CRD (raw manifest, kubectl-applied)
   claw/
     templates/controller-statefulset.yaml
     templates/service.yaml
@@ -130,7 +130,7 @@ charts/
 ```
 
 ```bash
-helm upgrade --install claw-crds ./charts/claw-crds
+kubectl apply -f ./charts/crds/          # CRDs: kubectl, not Helm (Helm never upgrades crds/)
 helm upgrade --install claw ./charts/claw
 ```
 
@@ -559,7 +559,7 @@ internal/
   apihttp/
     server.go  auth.go  handlers.go  ui_intake.go   # §8.3 one-time secret-intake page
 
-charts/  claw-crds/  claw/
+charts/  crds/  claw/
 examples/ gcp-cost-slack/  { agent.yaml, secrets.yaml, values-slack.yaml }
 ```
 

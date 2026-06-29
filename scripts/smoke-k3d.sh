@@ -42,8 +42,9 @@ docker build -q -t kube-claw-controller:dev .
 docker build -q -f Dockerfile.runner -t kube-claw-runner:dev .
 k3d image import kube-claw-controller:dev kube-claw-runner:dev -c "$CLUSTER"
 
-# 3. Install/upgrade charts.
-helm upgrade --install claw-crds ./charts/claw-crds
+# 3. Install/upgrade charts. CRDs apply via kubectl (not Helm — Helm only installs
+# crds/ on first install and never upgrades them), matching the deploy scripts.
+kubectl apply -f ./charts/crds/
 kubectl create namespace claw-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace claw-agents --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install claw ./charts/claw -n claw-system \

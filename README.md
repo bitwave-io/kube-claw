@@ -245,9 +245,10 @@ behind a port-forward today — add auth + TLS before exposing it.
 **Slack** (Helm `slack.*`): `enabled`, `tokenSecretName`, optional static `routes`
 (channels self-configure via onboarding otherwise).
 
-Two Helm charts: `charts/claw-crds` (the CRD) and `charts/claw` (the control plane).
-Note: Helm does not upgrade CRDs from `crds/` — `scripts/install.sh` applies the CRD
-with `kubectl` so install **and** upgrade work.
+One Helm chart, `charts/claw` (the control plane). The CRD lives in `charts/crds/`
+as plain manifests applied with `kubectl` (not Helm): Helm only installs `crds/`
+on first install and never upgrades them, so `scripts/install.sh` applies the CRD
+with `kubectl apply -f charts/crds/` directly — making install **and** upgrade work.
 
 **Images.** The chart defaults to the published Docker Hub images
 (`docker.io/bitwavecode/kube-claw-controller` + `kube-claw-runner`, tag `latest`).
@@ -358,7 +359,7 @@ Code layout:
 | `internal/apihttp` | HTTP API + admin UI |
 | `internal/store` | the `Store` interface (`sqlite` impl) |
 | `internal/workloads` | the run Job builder |
-| `charts/` | Helm charts (`claw-crds`, `claw`) |
+| `charts/` | Helm chart (`claw`) + raw CRD manifests (`crds/`) |
 | `images/` | base-image Dockerfiles (`gcloud`, `aws`, `azure`) |
 
 ---

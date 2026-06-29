@@ -100,7 +100,7 @@ fi
 
 # --- CRD + namespaces --------------------------------------------------------
 # Apply CRDs with kubectl (Helm never upgrades crds/), then ensure namespaces.
-kubectl apply -f "$ROOT/charts/claw-crds/crds/"
+kubectl apply -f "$ROOT/charts/crds/"
 kubectl get ns "$NS"        >/dev/null 2>&1 || kubectl create ns "$NS"
 kubectl get ns "$AGENTS_NS" >/dev/null 2>&1 || kubectl create ns "$AGENTS_NS"
 

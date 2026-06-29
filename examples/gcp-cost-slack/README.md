@@ -6,7 +6,7 @@ Run it on a local cluster with `scripts/smoke-k3d.sh`, or step through manually 
 ## Install
 
 ```bash
-helm upgrade --install claw-crds ./charts/claw-crds
+kubectl apply -f ./charts/crds/
 kubectl create namespace claw-system
 kubectl create namespace claw-agents
 helm upgrade --install claw ./charts/claw -n claw-system \
