@@ -28,6 +28,40 @@ func NewClassifier(apiKey string) *Classifier {
 	return &Classifier{client: anthropic.NewClient(option.WithAPIKey(apiKey))}
 }
 
+// ShouldRespond gates UNPROMPTED replies in an "active participant" channel
+// (mentionRequired=false): it returns true only when the bot is highly confident
+// it has something genuinely useful to add. The bar is deliberately high — most
+// chatter (greetings, banter, coordination between people, vague statements) must
+// return false so the bot stays quiet unless it can clearly help. A cheap Haiku
+// call; on any error it returns false (fail closed → stay silent, never spam).
+func (c *Classifier) ShouldRespond(ctx context.Context, message string) bool {
+	if strings.TrimSpace(message) == "" {
+		return false
+	}
+	sys := "You decide whether an AI cloud-operations assistant should speak up UNPROMPTED in a team " +
+		"chat channel, where it was NOT directly addressed. Reply YES only if you are about 90% sure the " +
+		"assistant has something concrete and clearly useful to add RIGHT NOW — e.g. a direct question it " +
+		"can answer, a problem it can help diagnose, or a request for cloud/ops help. Reply NO for everything " +
+		"else: greetings, banter, opinions, people coordinating with each other, vague or ambiguous statements, " +
+		"or anything where chiming in would be noise or presumptuous. When in doubt, reply NO. Output ONLY YES or NO."
+	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     "claude-haiku-4-5",
+		MaxTokens: 4,
+		System:    []anthropic.TextBlockParam{{Text: sys}},
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Message:\n" + message))},
+	})
+	if err != nil {
+		return false
+	}
+	var out string
+	for _, b := range resp.Content {
+		if t, ok := b.AsAny().(anthropic.TextBlock); ok {
+			out += t.Text
+		}
+	}
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(out)), "YES")
+}
+
 // PickAgent returns the namespace+name of the best-fit agent, or ("","") to fall
 // back. With a single agent it returns it directly (no LLM call).
 func (c *Classifier) PickAgent(ctx context.Context, request string, agents []AgentChoice) (ns, name string) {

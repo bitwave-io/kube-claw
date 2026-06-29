@@ -64,6 +64,10 @@ type Router struct {
 	AgentsNS     string                          // namespace for onboarded agents (default claw-agents)
 	Classifier   *Classifier                     // LLM agent router (nil = use the channel's agent)
 	AgentLister  func(context.Context) []AgentChoice // lists routable agents (injected; reads the CRDs)
+	// RelevanceGate decides whether to reply to an UNPROMPTED (non-mention) message
+	// in an active-participant channel. nil → derive from Classifier (and if that's
+	// also nil, the gate is open — respond to all routed messages, as before).
+	RelevanceGate func(ctx context.Context, text string) bool
 
 	mu      sync.Mutex                // guards pending
 	pending map[string]pendingMention // channel id → the @mention that arrived before onboarding
@@ -78,6 +82,18 @@ type pendingMention struct {
 	sessionID string
 	text      string
 	user      string
+}
+
+// shouldRespond gates an unprompted reply: the injected RelevanceGate wins, else
+// the Classifier's ShouldRespond, else (no LLM available) the gate is open.
+func (r *Router) shouldRespond(ctx context.Context, text string) bool {
+	if r.RelevanceGate != nil {
+		return r.RelevanceGate(ctx, text)
+	}
+	if r.Classifier != nil {
+		return r.Classifier.ShouldRespond(ctx, text)
+	}
+	return true
 }
 
 // pickAgent runs the classifier (if configured) over the available agents and
@@ -243,6 +259,14 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 		if mentioned {
 			r.stashPending(channel, pendingMention{eventID: eventID, sessionID: sessionID, text: text, user: user})
 		}
+		return "", nil
+	}
+	// Relevance gate for UNPROMPTED replies. An @mention is an explicit request, so
+	// it always proceeds; but in an "active participant" channel (route matched a
+	// non-mention message) we must be highly confident we have something useful to
+	// add before chiming in — otherwise the bot is noise. A cheap pre-gate here
+	// also avoids spinning up a run pod for chatter we'd never reply to.
+	if !mentioned && !r.shouldRespond(ctx, text) {
 		return "", nil
 	}
 	// New session → let the router pick the best-fit agent (it carries its own
