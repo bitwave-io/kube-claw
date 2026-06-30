@@ -98,8 +98,9 @@ router dispatches to them automatically.
   per-channel wiring.
 - **Self-configuring channels.** Add the bot to a channel and it DMs the inviter to
   ask how it should behave (active vs @-mentions only, in-channel vs threads).
-- **Locked-down pods.** Non-root, read-only root filesystem, dropped capabilities,
-  tmpfs secrets, projected SA token, deny-ingress NetworkPolicy.
+- **Locked-down pods.** Non-root, dropped capabilities, no privilege escalation,
+  tmpfs secrets, projected SA token, deny-ingress NetworkPolicy. (Rootfs is writable
+  so agents can install tooling at runtime; the sandbox is the boundary.)
 - **Self-hosted admin UI.** Secrets (rotate, never view), conversations for audit,
   agents (create/edit), base images, prompts, channels.
 
@@ -123,7 +124,7 @@ router dispatches to them automatically.
                     │  claw-bootstrap (PID1): /login → materialize → exec │
                     │  claw-runner: Claude tool-use loop                  │
                     │    tools: bash (gcloud/aws/az/curl…) + request_secret│
-                    │  non-root · ro-rootfs · tmpfs secrets · warm/idle    │
+                    │  non-root · dropped caps · tmpfs secrets · warm/idle │
                     └─────────────────────────────────────────────────────┘
 ```
 
@@ -320,8 +321,11 @@ prints the matching Helm values.
 
 ## Security model
 
-- Pods run **non-root**, **read-only root fs**, **all capabilities dropped**, with a
-  seccomp runtime-default profile and a baseline **deny-ingress NetworkPolicy**.
+- Pods run **non-root** (uid 65532), **all capabilities dropped**, no privilege
+  escalation, with a seccomp runtime-default profile and a baseline **deny-ingress
+  NetworkPolicy**. The root filesystem is **writable** so the agent's `bash` tool can
+  install tooling into its home at runtime (`pip --user`, `~/.local/bin`, …) — the
+  pod sandbox (caps/seccomp/network/ephemerality), not a read-only fs, is the boundary.
 - Secrets are **encrypted at rest** (Tink AES-256-GCM envelope; KMS-swappable) and
   delivered to a **memory-backed tmpfs**, wiped on pod exit.
 - Workloads **attest** via Kubernetes SA TokenReview; the issued claw session token
