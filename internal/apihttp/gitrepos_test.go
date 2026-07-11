@@ -3,7 +3,9 @@ package apihttp
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -187,6 +189,85 @@ func TestGitRepoManagementRequiresAdmin(t *testing.T) {
 	if rr.Code != 201 {
 		t.Fatalf("create with admin = %d (%s)", rr.Code, rr.Body)
 	}
+}
+
+// TestGitRepoUI exercises the dashboard: register a repo, confirm it lists
+// without leaking credentials, that an agent's access request surfaces on the
+// requests page, and that approving it there works (break-glass).
+func TestGitRepoUI(t *testing.T) {
+	s := fullServer(t)
+	h := s.handler()
+
+	// Register via the UI form.
+	form := url.Values{
+		"name": {"infra"}, "url": {"https://github.com/acme/infra.git"},
+		"description": {"tf"}, "readCredential": {"RO-KEY"}, "writeCredential": {"RW-KEY"},
+		"granters": {"U_BOSS, U_LEAD"},
+	}
+	if rr := postForm(t, h, "/ui/gitrepos/create", form); rr.Code != 303 && rr.Code != 200 {
+		t.Fatalf("ui create = %d (%s)", rr.Code, rr.Body)
+	}
+
+	// The list page shows the repo but never the credentials.
+	rr := do(t, h, "GET", "/ui/gitrepos", "")
+	b := rr.Body.String()
+	if rr.Code != 200 || !strings.Contains(b, "infra") || !strings.Contains(b, "U_BOSS") {
+		t.Fatalf("gitReposPage = %d body=%s", rr.Code, b)
+	}
+	if strings.Contains(b, "RO-KEY") || strings.Contains(b, "RW-KEY") {
+		t.Fatal("gitReposPage leaked a credential")
+	}
+
+	// An agent opens an access request; it should appear on /ui/requests.
+	_ = s.Store.Tx(t.Context(), func(tx store.Tx) error {
+		return tx.CreateRun(store.Run{ID: "run-1", AgentNamespace: "claw-agents", AgentName: "gcp-cost",
+			SessionID: "sess-1", Phase: "Running", Source: `{"trigger":"slack","user":"u9"}`})
+	})
+	tok, _ := s.Signer.Issue("run-1", nil, time.Hour)
+	if rr := doAuth(t, h, "POST", "/v1/runs/run-1/request-gitrepo",
+		`{"name":"infra","access":"write","reason":"push a fix"}`, tok); rr.Code != 200 {
+		t.Fatalf("request-gitrepo = %d (%s)", rr.Code, rr.Body)
+	}
+	rr = do(t, h, "GET", "/ui/requests", "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "infra") || !strings.Contains(rr.Body.String(), "push a fix") {
+		t.Fatalf("requestsPage missing gitrepo request = %d body=%s", rr.Code, rr.Body)
+	}
+
+	// Approve it from the dashboard, then the run's grant materializes.
+	var reqID string
+	_ = s.Store.Tx(t.Context(), func(tx store.Tx) error {
+		got, _ := tx.ListGitRepoRequests("Pending")
+		if len(got) > 0 {
+			reqID = got[0].ID
+		}
+		return nil
+	})
+	if rr := postForm(t, h, "/ui/gitrepo-requests/approve", url.Values{"id": {reqID}}); rr.Code != 303 && rr.Code != 200 {
+		t.Fatalf("ui approve = %d (%s)", rr.Code, rr.Body)
+	}
+	if rr := doAuth(t, h, "GET", "/v1/runs/run-1/requested-gitrepo?name=infra", "", tok); rr.Code != 200 {
+		t.Fatalf("materialize after ui approve = %d (%s)", rr.Code, rr.Body)
+	}
+
+	// Delete from the UI.
+	if rr := postForm(t, h, "/ui/gitrepos/delete", url.Values{"namespace": {"claw-agents"}, "name": {"infra"}}); rr.Code != 303 && rr.Code != 200 {
+		t.Fatalf("ui delete = %d (%s)", rr.Code, rr.Body)
+	}
+	// The empty page still contains the URL as a form placeholder, so assert on
+	// the "no repos" empty-state row instead.
+	if rr := do(t, h, "GET", "/ui/gitrepos", ""); !strings.Contains(rr.Body.String(), "No repos yet.") {
+		t.Fatalf("repo still listed after delete: %s", rr.Body)
+	}
+}
+
+// postForm issues a form-encoded POST (the dashboard handlers expect ParseForm).
+func postForm(t *testing.T, h http.Handler, path string, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
 }
 
 func decodeRepo(t *testing.T, body []byte) map[string]string {
