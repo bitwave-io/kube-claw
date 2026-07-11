@@ -31,6 +31,7 @@ import (
 	"github.com/traego/kube-claw/internal/apihttp"
 	"github.com/traego/kube-claw/internal/approvals"
 	"github.com/traego/kube-claw/internal/controller"
+	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/runengine"
@@ -123,6 +124,7 @@ func main() {
 	}
 	idProvider := &identity.KubernetesSAProvider{Client: clientset, Audience: "claw-controller"}
 	approvalSvc := &approvals.Service{Store: st, Secrets: secSvc, Reader: mgr.GetAPIReader()}
+	gitRepoSvc := &gitrepo.Service{Store: st, Reader: mgr.GetAPIReader()}
 
 	// Slack connector router (channel→agent routing + run creation). Built when
 	// routes are configured; usable via the fake event endpoint regardless of
@@ -174,17 +176,18 @@ func main() {
 
 	// HTTP API (uncached reader so /v1/agents works without waiting on caches).
 	if err := mgr.Add(&apihttp.Server{
-		Addr:      apiAddr,
-		Store:     st,
-		Reader:    mgr.GetAPIReader(),
-		K8s:       mgr.GetClient(),
-		Secrets:   secSvc,
-		UIBase:    uiBaseURL,
-		Identity:  idProvider,
-		Signer:    signer,
-		Approvals:     approvalSvc,
-		Router:        slackRt,
-		Notifier:      slackNotifier,
+		Addr:                  apiAddr,
+		Store:                 st,
+		Reader:                mgr.GetAPIReader(),
+		K8s:                   mgr.GetClient(),
+		Secrets:               secSvc,
+		UIBase:                uiBaseURL,
+		Identity:              idProvider,
+		Signer:                signer,
+		Approvals:             approvalSvc,
+		GitRepos:              gitRepoSvc,
+		Router:                slackRt,
+		Notifier:              slackNotifier,
 		AdminPassword:         os.Getenv("CLAW_ADMIN_PASSWORD"),
 		EnableFakeSlackEvents: os.Getenv("CLAW_ENABLE_FAKE_SLACK") == "true",
 	}); err != nil {
@@ -215,9 +218,9 @@ func main() {
 
 	// Run engine: launches a Job per Pending run (Phase 5 demo slice).
 	if err := mgr.Add(&runengine.Engine{
-		Store:         st,
-		K8s:           mgr.GetClient(),
-		RunnerImage:   runnerImage,
+		Store:           st,
+		K8s:             mgr.GetClient(),
+		RunnerImage:     runnerImage,
 		ControllerURL:   selfURL,
 		Interval:        2 * time.Second,
 		Notifier:        slackNotifier,

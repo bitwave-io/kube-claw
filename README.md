@@ -218,6 +218,79 @@ claw runs show <run-id>
 
 ---
 
+## External connectors (bring your own transport)
+
+Slack is one connector; any external message source — a SaaS product backend, a
+web-chat widget, an Events-API Slack gateway — can drive agents through the
+**connector plane**: register a callback URL, get back an ingest URL + API key.
+
+```bash
+# Register (uses the admin basic-auth credential when CLAW_ADMIN_PASSWORD is set).
+curl -u admin:$ADMIN_PASSWORD -X POST $CLAW_CONTROLLER_URL/v1/connectors -d '{
+  "name": "bitwave-slack",
+  "callbackUrl": "https://your-service.example.com/claw-events",
+  "agent": {"name": "general"}
+}'
+# → { "id": "conn-…", "ingestPath": "/v1/connectors/conn-…/messages",
+#     "apiKey": "ck_…", "signingSecret": "cs_…" }   # both shown ONCE
+```
+
+**Inbound** — POST messages to the ingest URL with the API key:
+
+```bash
+curl -X POST $CLAW_CONTROLLER_URL/v1/connectors/conn-…/messages \
+  -H "Authorization: Bearer ck_…" -d '{
+  "eventId": "evt-123",      # dedupes redeliveries
+  "sessionId": "chat-42",    # same id ⇒ same agent, history, and warm pod
+  "text": "what did we spend on GKE last week?",
+  "user": "customer-7"
+}'
+# → 202 { "runId": "run-…", "sessionId": "chat-42" }
+```
+
+**Outbound** — the agent's answer (and `progress` updates) POST back to your
+`callbackUrl` as `{runId, sessionId, kind, content}`, signed the way Slack signs
+its webhooks: verify `X-Claw-Signature: v1=hex(HMAC-SHA256(signingSecret,
+"<X-Claw-Timestamp>.<body>"))` and reject stale timestamps. Delivery retries
+transient failures; outputs stay queryable via `/v1/runs/{id}` regardless.
+
+Session ids are namespaced per connector internally, so a connector can never
+join or replay another connector's (or a Slack thread's) warm session. Keys are
+stored hashed, rotatable via `POST /v1/connectors/{id}/rotate-key`.
+
+---
+
+## Git repos (agent-requestable repositories)
+
+A git repository is a grantable resource, like a secret: an admin registers it
+(URL + credentials + who may approve), and an agent requests access **by name**
+at a level — `read` or `write` — at runtime. The request goes to the repo's
+granters for approval and becomes a durable grant bound to the agent's image
+digest + spec hash + access level (exactly like a secret grant).
+
+```bash
+# Register (admin surface). A read grant hands back readCredential; a write grant
+# hands back writeCredential — a read grant literally never sees the write key.
+curl -u admin:$ADMIN_PASSWORD -X POST $CLAW_CONTROLLER_URL/v1/gitrepos -d '{
+  "name": "infra",
+  "url": "https://github.com/acme/infra.git",
+  "description": "terraform modules",
+  "readCredential": "<ro-token-or-deploy-key>",
+  "writeCredential": "<rw-token-or-deploy-key>",
+  "granters": ["U_BOSS"]
+}'
+```
+
+At runtime the agent lists what it can request (`GET
+/v1/runs/{id}/available-gitrepos`), requests access
+(`POST /v1/runs/{id}/request-gitrepo` with `{name, access, reason}`), and once a
+granter approves (`POST /v1/gitrepo-requests/{id}/approve`) retrieves the URL +
+credential for its granted level (`GET /v1/runs/{id}/requested-gitrepo?name=…`).
+Credentials are never listed or returned except to a granted agent; every step
+is audited. Grants are revocable via `POST /v1/gitrepo-grants/{id}/revoke`.
+
+---
+
 ## Admin UI
 
 Served by the controller at **`/ui`** (port `8443`):
@@ -372,10 +445,13 @@ Code layout:
 
 MVP, actively developed. Working: the agent loop, secret authority + grants,
 on-demand `request_secret`, warm multi-turn sessions with history replay, the
-Slack connector (routing, onboarding, reactions), the LLM agent router, the
-base-image registry, and the admin UI.
+Slack connector (routing, onboarding, reactions), external connectors (API-key
+ingest + signed callbacks), git-repo access grants (read/write, request→approve),
+the LLM agent router, the base-image registry, and the admin UI.
 
-**Not yet done / hardening:** API + UI auth and TLS; a non-SQLite store + KMS master
+**Not yet done / hardening:** auth + TLS on the rest of the `/v1` API (connector
+ingest/management are authenticated; the core API is still cluster-internal
+only — do NOT expose it beyond the ingest paths); a non-SQLite store + KMS master
 key wired in; production deploy on GKE Autopilot (the target for the real cloud-cost
 use case); `aws`/`azure` base images built and published.
 

@@ -1,0 +1,74 @@
+# kube-claw Slack app manifest.
+#
+# Create the app from this in two clicks:
+#   1. https://api.slack.com/apps  ->  "Create New App"  ->  "From an app manifest"
+#   2. Pick your workspace, paste this file, Create.
+#
+# Then (one-time, on the app's settings pages):
+#   - Basic Information -> App-Level Tokens -> "Generate Token and Scopes",
+#     add the `connections:write` scope -> copy the `xapp-...` token  (SLACK_APP_TOKEN).
+#   - Install App -> "Install to Workspace" -> copy the
+#     "Bot User OAuth Token" `xoxb-...`                                (SLACK_BOT_TOKEN).
+#
+# Feed both tokens to the installer/deploy scripts (they prompt for them) or to
+# your .secrets.env. Socket Mode means there are NO public request URLs to host.
+#
+# The display name / bot name below (kube-claw) is cosmetic — rename freely.
+display_information:
+  name: kube-claw
+  description: Sandboxed AI agents that run in your Kubernetes cluster.
+  background_color: "#1f2933"
+
+features:
+  bot_user:
+    display_name: kube-claw
+    # Keep the bot online so it can be DM'd and @mentioned anytime.
+    always_online: true
+  # Enable the Messages tab so the bot's DM channel (secret-intake links,
+  # onboarding prompts, `register secret ...` commands) is usable.
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+
+oauth_config:
+  scopes:
+    bot:
+      # Receive @mentions that trigger a run.
+      - app_mentions:read
+      # Read messages in the channels/threads the bot participates in (the events
+      # below only deliver if the matching *:history scope is granted).
+      - channels:history
+      - groups:history
+      - im:history
+      # Channel metadata + react to "bot was added to a channel" onboarding.
+      - channels:read
+      # Post replies, approval prompts, onboarding messages, and DM secret links.
+      - chat:write
+      # Open / write the bot's DM with a user (secret-intake links, replies).
+      - im:read
+      - im:write
+      # Add the 👀 reaction the moment a run starts.
+      - reactions:write
+
+settings:
+  # Socket Mode: the controller holds a WebSocket to Slack — no inbound HTTP,
+  # no public Request URL to expose. Requires an app-level token with
+  # `connections:write` (generated separately under App-Level Tokens).
+  socket_mode_enabled: true
+  # Interactive approve/deny + onboarding buttons are handled over Socket Mode.
+  interactivity:
+    is_enabled: true
+  event_subscriptions:
+    bot_events:
+      # @mention -> create a run.
+      - app_mention
+      # Channel / private-channel / DM messages -> route, continue threads, or
+      # handle DM commands like "register secret ...".
+      - message.channels
+      - message.groups
+      - message.im
+      # Bot added to a channel -> DM the inviter to configure behavior.
+      - member_joined_channel
+  org_deploy_enabled: false
+  token_rotation_enabled: false
