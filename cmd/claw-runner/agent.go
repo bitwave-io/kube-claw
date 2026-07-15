@@ -29,6 +29,12 @@ type agentSession struct {
 	token         string // CLAW_TOKEN, for on-demand secret requests
 	runID         string
 
+	// servedModel is the model ID the API reported serving the last call; the
+	// first reply this pod posts is tagged with it (a fresh tag mid-thread means
+	// the warm pod restarted — useful when diagnosing stalls/evictions).
+	servedModel string
+	modelTagged bool
+
 	mu   sync.Mutex // guards step
 	step string     // the agent's current narrated step, surfaced by the heartbeat
 }
@@ -197,6 +203,7 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 		if err != nil {
 			return "", err
 		}
+		s.servedModel = string(resp.Model)
 		s.messages = append(s.messages, resp.ToParam())
 
 		var turn []string
@@ -242,6 +249,12 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 	answer := strings.Join(final, "\n\n")
 	if answer == "" {
 		return "", fmt.Errorf("agent produced no text answer")
+	}
+	// Tag the pod's first reply with the model actually served (per the API
+	// response, not the requested constant). Re-appearing mid-thread = pod restart.
+	if !s.modelTagged && s.servedModel != "" {
+		answer += fmt.Sprintf("\n\n_model: %s_", s.servedModel)
+		s.modelTagged = true
 	}
 	return answer, nil
 }

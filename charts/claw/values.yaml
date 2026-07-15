@@ -6,7 +6,7 @@ image:
   # <semver> (docker/metadata-action strips the leading v from the git tag) and
   # sha-<commit> tags; bump this in lockstep with Chart.yaml appVersion.
   # Quickstart users can override to :latest if desired.
-  tag: "0.3.1"
+  tag: "0.3.2"
   pullPolicy: IfNotPresent
 
 # Namespace agents live in. Created by the deploy script (scripts/deploy-gke.sh /
@@ -14,6 +14,13 @@ image:
 # here on startup so the install works out of the box. Not chart-managed to avoid
 # Helm ownership conflicts with the imperatively-created namespace.
 agentNamespace: claw-agents
+
+# PDB (maxUnavailable: 0) over agent run pods so cluster-autoscaler scale-down
+# can't evict a warm session pod mid-run (Autopilot rejects safe-to-evict=false
+# on pods requesting <500m CPU). Drains wait at most the run Job's
+# activeDeadlineSeconds (30m). Disable if you'd rather let consolidation win.
+agentPodDisruptionBudget:
+  enabled: true
 
 controller:
   # Opt-in agent egress restriction (deny east/west). Verify per-cluster before enabling.
@@ -27,7 +34,7 @@ controller:
   logFormat: console
   # Image the run engine launches for each run Job (DESIGN.md §11). Pinned to the
   # same release tag as the controller (see image.tag note re: :latest).
-  runnerImage: docker.io/bitwavecode/kube-claw-runner:0.3.1
+  runnerImage: docker.io/bitwavecode/kube-claw-runner:0.3.2
   # Admin dashboard (/ui) basic-auth password is read from this Secret (key
   # "password", user "admin"). Absent secret/key => the admin UI is unauthenticated.
   # scripts/install.sh creates it; create out-of-band otherwise.

@@ -1,0 +1,15 @@
+# Incident mitigation 2026-07-15: GKE Autopilot scale-down keeps evicting
+# agent run pods mid-session (Warden rejects safe-to-evict=false because the
+# pods request <500m CPU). A maxUnavailable:0 PDB blocks voluntary evictions,
+# including autoscaler scale-down. Delete after the runner template ships an
+# eviction fix.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: claw-agents-no-scale-down-evict
+  namespace: claw-agents
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: kube-claw

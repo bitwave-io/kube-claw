@@ -56,6 +56,21 @@ func TestRelevanceGate(t *testing.T) {
 		t.Fatal("gate=YES should create a run")
 	}
 
+	// A message @mentioning someone ELSE is addressed to that person: dropped
+	// deterministically, without even consulting the LLM gate.
+	gateAnswer = true
+	beforeOther := gateCalls
+	runID, err = r.HandleMessage(ctx, "evt-other", "C_ACTIVE", "evt-other", "<@U2PERSON> can you check the LB config?", false, "U1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runID != "" {
+		t.Fatalf("a message @mentioning another user must be dropped, got run %q", runID)
+	}
+	if gateCalls != beforeOther {
+		t.Fatalf("the gate must not be consulted when another user is @mentioned (calls went %d→%d)", beforeOther, gateCalls)
+	}
+
 	// An @mention bypasses the gate entirely (even with gate=NO it must respond).
 	gateAnswer = false
 	before := gateCalls

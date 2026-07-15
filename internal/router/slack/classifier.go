@@ -39,11 +39,16 @@ func (c *Classifier) ShouldRespond(ctx context.Context, message string) bool {
 		return false
 	}
 	sys := "You decide whether an AI cloud-operations assistant should speak up UNPROMPTED in a team " +
-		"chat channel, where it was NOT directly addressed. Reply YES only if you are about 90% sure the " +
-		"assistant has something concrete and clearly useful to add RIGHT NOW — e.g. a direct question it " +
-		"can answer, a problem it can help diagnose, or a request for cloud/ops help. Reply NO for everything " +
-		"else: greetings, banter, opinions, people coordinating with each other, vague or ambiguous statements, " +
-		"or anything where chiming in would be noise or presumptuous. When in doubt, reply NO. Output ONLY YES or NO."
+		"chat channel — often a busy incident channel — where it was NOT directly addressed. Reply YES only " +
+		"if you are about 90% sure the assistant has something concrete and clearly useful to add RIGHT NOW — " +
+		"e.g. a question asked to the room at large that it can answer, a problem it can help diagnose, or a " +
+		"request for cloud/ops help that nobody has been asked to handle. " +
+		"Reply NO whenever the message has a specific human addressee — an @mention, a name (\"Sarah, can you " +
+		"check the LB?\"), or a reply/answer to a specific person. If it is someone's turn to speak and that " +
+		"someone is not the assistant, reply NO even if the assistant could technically help. " +
+		"Also reply NO for people coordinating with each other (acks, handoffs, status updates, \"I'm on it\", " +
+		"\"looking\"), greetings, banter, opinions, and vague or ambiguous statements — during an incident, " +
+		"unrequested commentary is disruptive, not helpful. When in doubt, reply NO. Output ONLY YES or NO."
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     "claude-haiku-4-5",
 		MaxTokens: 4,
