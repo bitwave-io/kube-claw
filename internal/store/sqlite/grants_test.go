@@ -21,7 +21,7 @@ func TestGrantsAndRequests(t *testing.T) {
 	}
 
 	const (
-		ns, agent, secretID = "claw-agents", "gcp-cost", "sec-1"
+		ns, agent, secretID     = "claw-agents", "gcp-cost", "sec-1"
 		digest, specHash, dHash = "sha256:img", "sha256:spec", "sha256:deliv"
 	)
 	tx := func(fn func(store.Tx) error) {

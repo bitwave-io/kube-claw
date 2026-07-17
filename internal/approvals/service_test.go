@@ -71,7 +71,7 @@ func TestApproveByPrincipal_GranterCheck(t *testing.T) {
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&clawv1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "gcp-cost", Namespace: "claw-agents"},
 		Spec: clawv1alpha1.AgentSpec{
-			Image: "x@sha256:abc",
+			Image:   "x@sha256:abc",
 			Secrets: []clawv1alpha1.SecretRef{{Name: "gcp-billing", Delivery: clawv1alpha1.DeliverySpec{Path: "/p"}}},
 		},
 		Status: clawv1alpha1.AgentStatus{SelectedImageDigest: "sha256:abc", AgentSpecHash: "sha256:spec"},
