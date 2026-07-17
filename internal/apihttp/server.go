@@ -58,6 +58,8 @@ type Server struct {
 	// EnableFakeSlackEvents registers the test-only POST /v1/connectors/slack/events
 	// endpoint. Off in prod so callers can't simulate Slack-triggered runs.
 	EnableFakeSlackEvents bool
+	// Upgrades exposes the self-update coordinator (nil = self-update off).
+	Upgrades UpgradeAPI
 }
 
 // NeedLeaderElection lets the API run on every replica (false = not gated).
@@ -144,6 +146,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/prompts", s.promptsPage)
 	mux.HandleFunc("POST /ui/prompts", s.promptsSubmit)
 	mux.HandleFunc("GET /v1/version", s.getVersion)
+	mux.HandleFunc("GET /v1/upgrade/status", s.upgradeStatus)
+	mux.HandleFunc("POST /v1/upgrade/approve", s.upgradeApprove)
 	mux.HandleFunc("GET /v1/settings", s.listSettings)
 	mux.HandleFunc("PUT /v1/settings/{key}", s.setSetting)
 	mux.HandleFunc("GET /v1/schedules", s.listSchedules)

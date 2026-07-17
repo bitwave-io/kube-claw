@@ -38,6 +38,17 @@ func Newer(candidate, current string) bool {
 	return semver.Compare(c, r) > 0
 }
 
+// Valid reports whether v is a usable release version (canonicalized semver).
+func Valid(v string) bool { return semver.IsValid(canon(v)) }
+
+// Same reports whether a and b are the same release (canonicalized semver
+// equality — "0.4.0" and "v0.4.0" are the same). Invalid semver on either
+// side is never "same".
+func Same(a, b string) bool {
+	ca, cb := canon(a), canon(b)
+	return semver.IsValid(ca) && semver.IsValid(cb) && semver.Compare(ca, cb) == 0
+}
+
 // Max returns the semver-newer of a and b, preferring valid semver over
 // invalid; two invalid inputs return a. Used for the desired-version rule
 // (DESIGN.md §24.2): desired = max(helm-pinned, approved).

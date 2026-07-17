@@ -32,8 +32,22 @@ func newRootCmd() *cobra.Command {
 		def = "http://localhost:8443"
 	}
 	root.PersistentFlags().StringVar(&controllerURL, "controller-url", def, "controller API base URL")
-	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd(), newAgentsCmd(), newBaseImageCmd(), newPromptCmd(), newScheduleCmd(), newSettingsCmd())
+	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd(), newAgentsCmd(), newBaseImageCmd(), newPromptCmd(), newScheduleCmd(), newSettingsCmd(), newUpgradeCmd())
 	return root
+}
+
+func newUpgradeCmd() *cobra.Command {
+	c := &cobra.Command{Use: "upgrade", Short: "Self-update plane: status + break-glass approval (DESIGN.md §24)"}
+	c.AddCommand(
+		&cobra.Command{Use: "status", Short: "Show running/available versions and update phase",
+			RunE: func(_ *cobra.Command, _ []string) error { return apiPrint(http.MethodGet, "/v1/upgrade/status") }},
+		&cobra.Command{Use: "approve VERSION", Short: "Approve the offered release without Slack (break-glass); needs CLAW_ADMIN_PASSWORD when configured",
+			Args: cobra.ExactArgs(1),
+			RunE: func(_ *cobra.Command, args []string) error {
+				return apiJSON(http.MethodPost, "/v1/upgrade/approve", map[string]any{"version": args[0]}, nil)
+			}},
+	)
+	return c
 }
 
 func newSettingsCmd() *cobra.Command {

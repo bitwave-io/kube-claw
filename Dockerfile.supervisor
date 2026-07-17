@@ -1,0 +1,19 @@
+# kube-claw supervisor image (the self-update plane, DESIGN.md §24). Same
+# distroless/nonroot shape as the controller; deliberately tiny.
+FROM golang:1.26 AS build
+WORKDIR /src
+ENV GOTOOLCHAIN=local
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w -X github.com/traego/kube-claw/internal/version.Version=${VERSION}" \
+    -o /out/claw-supervisor ./cmd/claw-supervisor
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/claw-supervisor /claw-supervisor
+USER 65532:65532
+ENTRYPOINT ["/claw-supervisor"]

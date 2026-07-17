@@ -20,6 +20,7 @@ on:
       - "Dockerfile"
       - "Dockerfile.runner"
       - "Dockerfile.runner-bash"
+      - "Dockerfile.supervisor"
       - "images/**"
       - "cmd/**"
       - "internal/**"
@@ -46,6 +47,8 @@ jobs:
             dockerfile: Dockerfile.runner
           - name: runner-bash
             dockerfile: Dockerfile.runner-bash
+          - name: supervisor
+            dockerfile: Dockerfile.supervisor
           - name: gcloud
             dockerfile: images/gcloud/Dockerfile
           - name: aws
@@ -71,6 +74,17 @@ jobs:
             type=sha
             type=semver,pattern={{version}}
 
+      # Stamp the release version into the binaries (internal/version) so the
+      # self-update plane can semver-compare what it runs (DESIGN.md §24).
+      # Non-tag builds stamp "dev" — deliberately never upgrade-comparable.
+      - id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build + push kube-claw-${{ matrix.name }}
         uses: docker/build-push-action@v6
         with:
@@ -78,7 +92,57 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=kube-claw-${{ matrix.name }}
           cache-to: type=gha,scope=kube-claw-${{ matrix.name }},mode=max
+
+  # Release manifest (DESIGN.md §24.3): on a version tag, resolve the pushed
+  # images to DIGESTS and publish manifest-<channel>.json as a release asset.
+  # The supervisor polls .../releases/latest/download/manifest-stable.json —
+  # digest-pinned refs mean an approval runs byte-for-byte what was approved.
+  release-manifest:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release + upload the asset
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Render manifest-stable.json
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/}"        # v0.4.0
+          TAG="${VERSION#v}"                        # 0.4.0 (metadata-action strips the v)
+          digest_of() {
+            docker buildx imagetools inspect "docker.io/${NAMESPACE}/$1:${TAG}"               --format '{{json .Manifest.Digest}}' | tr -d '"'
+          }
+          CTRL="docker.io/${NAMESPACE}/kube-claw-controller@$(digest_of kube-claw-controller)"
+          RUNNER="docker.io/${NAMESPACE}/kube-claw-runner@$(digest_of kube-claw-runner)"
+          # Flags a release can set via the tag's commit (see docs): a file
+          # release/flags.json at the tag may carry requiresHelmUpgrade /
+          # containsMigration / minSupervisorVersion / notes overrides.
+          FLAGS="{}"
+          [[ -f release/flags.json ]] && FLAGS="$(cat release/flags.json)"
+          jq -n             --arg version "$VERSION"             --arg controller "$CTRL"             --arg runner "$RUNNER"             --arg releasedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)"             --argjson flags "$FLAGS"             '{schemaVersion: 1, channel: "stable", version: $version,
+              releasedAt: $releasedAt,
+              images: {controller: $controller, runner: $runner}}
+             + $flags' > manifest-stable.json
+          cat manifest-stable.json
+
+      - name: Create release + upload manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/}"
+          gh release view "$VERSION" >/dev/null 2>&1 ||             gh release create "$VERSION" --title "$VERSION" --generate-notes
+          gh release upload "$VERSION" manifest-stable.json --clobber

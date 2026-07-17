@@ -40,7 +40,8 @@ esac
 # 2. Build + import images.
 docker build -q -t kube-claw-controller:dev .
 docker build -q -f Dockerfile.runner -t kube-claw-runner:dev .
-k3d image import kube-claw-controller:dev kube-claw-runner:dev -c "$CLUSTER"
+docker build -q -f Dockerfile.supervisor -t kube-claw-supervisor:dev .
+k3d image import kube-claw-controller:dev kube-claw-runner:dev kube-claw-supervisor:dev -c "$CLUSTER"
 
 # 3. Install/upgrade charts. CRDs apply via kubectl (not Helm — Helm only installs
 # crds/ on first install and never upgrades them), matching the deploy scripts.
@@ -48,8 +49,16 @@ kubectl apply -f ./charts/crds/
 kubectl create namespace claw-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace claw-agents --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install claw ./charts/claw -n claw-system \
-  --set image.repository=kube-claw-controller --set image.tag=dev --set image.pullPolicy=IfNotPresent \
-  --set controller.runnerImage=kube-claw-runner:dev
+  --set image.repository=kube-claw-controller --set image.runnerRepository=kube-claw-runner \
+  --set supervisor.repository=kube-claw-supervisor --set version=dev \
+  --set image.pullPolicy=IfNotPresent --set updates.mode=manual
+kubectl -n claw-system rollout restart deployment/claw-supervisor
+kubectl -n claw-system rollout status deployment/claw-supervisor --timeout=120s
+echo "waiting for the supervisor to create the controller..."
+for i in $(seq 1 60); do
+  kubectl -n claw-system get statefulset/claw-controller >/dev/null 2>&1 && break
+  sleep 2
+done
 kubectl -n claw-system rollout restart statefulset/claw-controller
 kubectl -n claw-system rollout status statefulset/claw-controller --timeout=120s
 

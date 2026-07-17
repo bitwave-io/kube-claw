@@ -1,6 +1,6 @@
 apiVersion: v2
 name: claw
-description: kube-claw control plane (controller + embedded Slack router + secret authority)
+description: kube-claw control plane (supervisor-managed controller + embedded Slack router + secret authority)
 type: application
-version: 0.2.1
-appVersion: "0.3.1"
+version: 0.4.0
+appVersion: "0.4.0"

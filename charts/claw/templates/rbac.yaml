@@ -14,6 +14,12 @@ rules:
     resources: ["agents", "agents/status"]
     # create/delete: the API lets you register agents without YAML (claw agent create).
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Self-update plane (DESIGN.md §24): the controller writes approval
+  # annotations and status.runningVersion (startup-confirmed) on its own
+  # ControlPlane; the supervisor consumes them.
+  - apiGroups: ["claw.run"]
+    resources: ["controlplanes", "controlplanes/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -42,4 +48,43 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: claw-controller
+    namespace: {{ .Release.Namespace }}
+---
+# Self-update plane RBAC (DESIGN.md §24.7). Deliberately NAMESPACED and NOT a
+# superset of the controller's powers: Kubernetes only lets a principal grant
+# permissions it holds, so a supervisor that managed the controller's SA/RBAC
+# would need everything the controller has — defeating the tiny-trusted-thing
+# goal. RBAC stays static here; a release needing new RBAC is a helm-level
+# release (requiresHelmUpgrade). The bot token reaches the supervisor via env
+# secretKeyRef (kubelet-side), so no secrets API access is needed at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: claw-supervisor
+  labels:
+    app.kubernetes.io/name: claw-supervisor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claw-supervisor
+rules:
+  - apiGroups: ["claw.run"]
+    resources: ["controlplanes", "controlplanes/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claw-supervisor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claw-supervisor
+subjects:
+  - kind: ServiceAccount
+    name: claw-supervisor
     namespace: {{ .Release.Namespace }}

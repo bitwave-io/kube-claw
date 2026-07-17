@@ -45,12 +45,13 @@ done
 cat <<EOF
 
 Done. Reference these in Helm values-gke.yaml (or --set):
-  image.repository = ${REGISTRY}/kube-claw-controller
-  image.tag        = ${TAG}
-  controller.runnerImage = ${REGISTRY}/kube-claw-runner:${TAG}
+  image.repository       = ${REGISTRY}/kube-claw-controller
+  image.runnerRepository = ${REGISTRY}/kube-claw-runner
+  supervisor.repository  = ${REGISTRY}/kube-claw-supervisor
+  version                = ${TAG}
 
 The controller auto-registers the gcloud/aws/azure base images on startup,
-deriving their refs from runnerImage (same registry + tag). Point an agent at one
+deriving their refs from the runner repository (same registry + tag). Point an agent at one
 with:  spec.baseImageRef: gcloud   (or aws / azure)
 
 If your images don't follow the kube-claw-<name> naming, override the refs with
