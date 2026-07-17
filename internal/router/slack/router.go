@@ -57,18 +57,23 @@ type Router struct {
 	Config       Config
 	Store        store.Store
 	Approvals    *approvals.Service
-	Secrets      *secrets.Service // for DM-based secret registration
-	Notifier     *Notifier        // for DM replies
-	UIBase       string           // intake link base URL
-	BotUserID    string                          // this bot's Slack user id (set at connect)
-	DefaultAgent string                          // agent assigned when a channel is onboarded
-	AgentsNS     string                          // namespace for onboarded agents (default claw-agents)
-	Classifier   *Classifier                     // LLM agent router (nil = use the channel's agent)
+	Secrets      *secrets.Service                    // for DM-based secret registration
+	Notifier     *Notifier                           // for DM replies
+	UIBase       string                              // intake link base URL
+	BotUserID    string                              // this bot's Slack user id (set at connect)
+	DefaultAgent string                              // agent assigned when a channel is onboarded
+	AgentsNS     string                              // namespace for onboarded agents (default claw-agents)
+	Classifier   *Classifier                         // LLM agent router (nil = use the channel's agent)
 	AgentLister  func(context.Context) []AgentChoice // lists routable agents (injected; reads the CRDs)
 	// RelevanceGate decides whether to reply to an UNPROMPTED (non-mention) message
 	// in an active-participant channel. nil → derive from Classifier (and if that's
 	// also nil, the gate is open — respond to all routed messages, as before).
 	RelevanceGate func(ctx context.Context, text string) bool
+	// ThreadGate decides whether to reply to a non-mention message in a thread the
+	// bot is already engaged in. Its default is OPEN (a reply in the bot's thread
+	// is usually for the bot); it only suppresses messages clearly addressed to
+	// someone else. nil → derive from Classifier; no Classifier → always reply.
+	ThreadGate func(ctx context.Context, text string) bool
 
 	mu      sync.Mutex                // guards pending
 	pending map[string]pendingMention // channel id → the @mention that arrived before onboarding
@@ -105,6 +110,18 @@ func (r *Router) shouldRespond(ctx context.Context, text string) bool {
 	}
 	if r.Classifier != nil {
 		return r.Classifier.ShouldRespond(ctx, text)
+	}
+	return true
+}
+
+// shouldRespondInThread gates a non-mention reply inside an engaged thread: the
+// injected ThreadGate wins, else the Classifier's ShouldRespondInThread, else open.
+func (r *Router) shouldRespondInThread(ctx context.Context, text string) bool {
+	if r.ThreadGate != nil {
+		return r.ThreadGate(ctx, text)
+	}
+	if r.Classifier != nil {
+		return r.Classifier.ShouldRespondInThread(ctx, text)
 	}
 	return true
 }
@@ -317,7 +334,7 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 // HandleThreadReply continues a conversation: a reply in a thread the bot is
 // already engaged in creates a follow-up run for the same agent (no @mention
 // needed). Returns "" if the thread has no prior bot run (so we ignore it).
-func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, threadTS, text, user string) (string, error) {
+func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, threadTS, text string, mentioned bool, user string) (string, error) {
 	var prior store.Run
 	found := false
 	if err := r.Store.Tx(ctx, func(tx store.Tx) error {
@@ -334,6 +351,12 @@ func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, thread
 	}
 	if !found {
 		return "", nil // not a thread the bot started
+	}
+	// In a busy thread two humans may be talking to each other — don't butt into
+	// every reply. An @mention always proceeds; otherwise a default-open gate only
+	// suppresses messages clearly addressed to someone else.
+	if !mentioned && !r.shouldRespondInThread(ctx, text) {
+		return "", nil
 	}
 	runID := "run-" + randHex()
 	created := false

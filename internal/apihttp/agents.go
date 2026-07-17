@@ -18,6 +18,7 @@ type createAgentReq struct {
 	BaseImageRef string `json:"baseImageRef"`
 	Image        string `json:"image"`
 	SystemPrompt string `json:"systemPrompt"`
+	Model        string `json:"model"` // optional Anthropic model override for the agent loop
 	IdleTimeout  string `json:"idleTimeout"`
 	Secrets      []struct {
 		Name string `json:"name"`
@@ -48,8 +49,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			Runtime:      clawv1alpha1.RuntimeSpec{Mode: "scaleToZeroSession", IdleTimeout: orDefault(req.IdleTimeout, "15m")},
 		},
 	}
-	if req.SystemPrompt != "" {
-		agent.Spec.Model = &clawv1alpha1.ModelSpec{SystemPrompt: req.SystemPrompt}
+	if req.SystemPrompt != "" || req.Model != "" {
+		agent.Spec.Model = &clawv1alpha1.ModelSpec{SystemPrompt: req.SystemPrompt, Model: req.Model}
 	}
 	for _, sec := range req.Secrets {
 		d := clawv1alpha1.DeliverySpec{Type: "file", Path: sec.Path, Mode: "0400"}

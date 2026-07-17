@@ -24,7 +24,7 @@ func RunJobName(run store.Run) string { return run.ID }
 
 // BuildRunJob builds the one-shot Job for a run. It runs as the agent's
 // ServiceAccount (claw-agent-<name>) with a locked-down pod security context.
-func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText, systemPrompt, anthropicSecret, idleTimeout string) *batchv1.Job {
+func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText, systemPrompt, model, anthropicSecret, idleTimeout string) *batchv1.Job {
 	if idleTimeout == "" {
 		idleTimeout = "5m"
 	}
@@ -36,6 +36,8 @@ func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText, systemPro
 		{Name: "CLAW_CONTROLLER_URL", Value: controllerURL},
 		{Name: "CLAW_INPUT", Value: inputText},
 		{Name: "CLAW_SYSTEM_PROMPT", Value: systemPrompt},
+		// Per-agent model override for the runner's agent loop ("" = runner default).
+		{Name: "CLAW_MODEL", Value: model},
 		// Warm-session idle timeout: the pod waits this long for a follow-up turn
 		// after answering, resetting on each new turn, before scaling to zero.
 		{Name: "CLAW_IDLE_TIMEOUT", Value: idleTimeout},

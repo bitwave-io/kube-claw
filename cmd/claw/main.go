@@ -232,7 +232,7 @@ func newAgentsCmd() *cobra.Command {
 		return apiPrint(http.MethodGet, "/v1/agents")
 	}})
 
-	var ns, base, image, prompt, idle string
+	var ns, base, image, prompt, model, idle string
 	var secretSpecs []string
 	create := &cobra.Command{
 		Use:   "create NAME",
@@ -254,7 +254,7 @@ func newAgentsCmd() *cobra.Command {
 			}
 			return apiJSON(http.MethodPost, "/v1/agents", map[string]any{
 				"namespace": ns, "name": args[0], "baseImageRef": base, "image": image,
-				"systemPrompt": prompt, "idleTimeout": idle, "secrets": secrets,
+				"systemPrompt": prompt, "model": model, "idleTimeout": idle, "secrets": secrets,
 			}, nil)
 		},
 	}
@@ -262,6 +262,7 @@ func newAgentsCmd() *cobra.Command {
 	create.Flags().StringVar(&base, "base", "", "base image ref (registered base image name)")
 	create.Flags().StringVar(&image, "image", "", "explicit digest-pinned image (alternative to --base)")
 	create.Flags().StringVar(&prompt, "system-prompt", "", "agent system prompt")
+	create.Flags().StringVar(&model, "model", "", "Anthropic model override for the agent loop (default: runner's default, Opus)")
 	create.Flags().StringVar(&idle, "idle-timeout", "15m", "scale-to-zero idle timeout")
 	create.Flags().StringArrayVar(&secretSpecs, "secret", nil, "secret as name:path:ENVVAR (repeatable)")
 	c.AddCommand(create)

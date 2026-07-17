@@ -35,7 +35,10 @@ func NewClassifier(apiKey string) *Classifier {
 // return false so the bot stays quiet unless it can clearly help. A cheap Haiku
 // call; on any error it returns false (fail closed → stay silent, never spam).
 func (c *Classifier) ShouldRespond(ctx context.Context, message string) bool {
-	if strings.TrimSpace(message) == "" {
+	msg := strings.TrimSpace(message)
+	// Too short to be an actionable request ("lol", "ok", "why?") — don't spend
+	// an LLM call deciding; an unprompted bot reply to these is always noise.
+	if len(msg) < 6 {
 		return false
 	}
 	sys := "You decide whether an AI cloud-operations assistant should speak up UNPROMPTED in a team " +
@@ -48,15 +51,44 @@ func (c *Classifier) ShouldRespond(ctx context.Context, message string) bool {
 		"someone is not the assistant, reply NO even if the assistant could technically help. " +
 		"Also reply NO for people coordinating with each other (acks, handoffs, status updates, \"I'm on it\", " +
 		"\"looking\"), greetings, banter, opinions, and vague or ambiguous statements — during an incident, " +
-		"unrequested commentary is disruptive, not helpful. When in doubt, reply NO. Output ONLY YES or NO."
+		"unrequested commentary is disruptive, not helpful. When in doubt, reply NO. Output ONLY YES or NO.\n\n" +
+		"Examples:\n" +
+		"\"why is our GKE bill suddenly 3x higher this month?\" → YES\n" +
+		"\"anyone know how to list buckets that are public?\" → YES\n" +
+		"\"morning all 👋\" → NO\n" +
+		"\"<@U02ALICE>: <@U0DAVE> can you look at the deploy when you're back?\" → NO\n" +
+		"\"ugh, cloud costs\" → NO"
+	return c.yesNo(ctx, sys, "Message:\n"+msg, false)
+}
+
+// ShouldRespondInThread gates a reply inside a thread the bot is already
+// participating in. Unlike ShouldRespond, the default here is OPEN — a reply in
+// the bot's own thread is usually addressed to it — so it returns false only
+// when the message is clearly meant for someone else. It also fails open on
+// error: dropping a legitimate follow-up is worse than one extra reply.
+func (c *Classifier) ShouldRespondInThread(ctx context.Context, message string) bool {
+	if strings.TrimSpace(message) == "" {
+		return false
+	}
+	sys := "An AI cloud-operations assistant is active in a Slack thread it was brought into. You decide " +
+		"whether the latest reply in that thread is meant for the assistant. Reply YES unless the message is " +
+		"CLEARLY not addressed to it — e.g. it @mentions or names another person as the one being asked, or " +
+		"it is plainly a side-conversation between two humans. Follow-up questions, corrections, " +
+		"acknowledgements, and anything ambiguous ARE for the assistant: reply YES. Output ONLY YES or NO."
+	return c.yesNo(ctx, sys, "Thread reply:\n"+message, true)
+}
+
+// yesNo runs a tiny Haiku YES/NO classification; onErr is returned when the
+// call fails (false = fail closed / stay silent, true = fail open / respond).
+func (c *Classifier) yesNo(ctx context.Context, sys, user string, onErr bool) bool {
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     "claude-haiku-4-5",
 		MaxTokens: 4,
 		System:    []anthropic.TextBlockParam{{Text: sys}},
-		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Message:\n" + message))},
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(user))},
 	})
 	if err != nil {
-		return false
+		return onErr
 	}
 	var out string
 	for _, b := range resp.Content {
@@ -64,7 +96,11 @@ func (c *Classifier) ShouldRespond(ctx context.Context, message string) bool {
 			out += t.Text
 		}
 	}
-	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(out)), "YES")
+	verdict := strings.ToUpper(strings.TrimSpace(out))
+	if onErr {
+		return !strings.HasPrefix(verdict, "NO") // default open
+	}
+	return strings.HasPrefix(verdict, "YES") // default closed
 }
 
 // PickAgent returns the namespace+name of the best-fit agent, or ("","") to fall
@@ -81,7 +117,8 @@ func (c *Classifier) PickAgent(ctx context.Context, request string, agents []Age
 		fmt.Fprintf(&list, "- %s: %s\n", a.Name, a.Description)
 	}
 	sys := "You route a user request to the best-fit agent. Given the request and a list of agents " +
-		"(name: what it's for), reply with ONLY the single best agent name from the list. Output just the name."
+		"(name: what it's for), reply with ONLY the single best agent name from the list. " +
+		"If none of the agents is a reasonable fit for the request, reply NONE. Output just the name, nothing else."
 	user := fmt.Sprintf("Request:\n%s\n\nAgents:\n%s", request, list.String())
 
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
@@ -99,7 +136,16 @@ func (c *Classifier) PickAgent(ctx context.Context, request string, agents []Age
 			pick += t.Text
 		}
 	}
+	// Normalize: models love to wrap the name in backticks/quotes or add a period;
+	// without this the exact-match below silently falls back on a correct pick.
 	pick = strings.ToLower(strings.TrimSpace(pick))
+	if f := strings.Fields(pick); len(f) > 0 {
+		pick = f[0]
+	}
+	pick = strings.Trim(pick, "`'\".,:!")
+	if pick == "" || pick == "none" {
+		return "", "" // no clear fit — fall back to the channel's agent
+	}
 	for _, a := range agents {
 		if strings.ToLower(a.Name) == pick {
 			return a.Namespace, a.Name
