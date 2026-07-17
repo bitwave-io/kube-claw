@@ -12,7 +12,7 @@ func TestNewer(t *testing.T) {
 		{"v0.3.1", "v0.3.1", false},
 		{"v0.3.0", "v0.3.1", false},
 		{"v1.0.0", "v0.99.9", true},
-		{"v0.4.0", "dev", false},   // dev build: never upgradeable (fail closed)
+		{"v0.4.0", "dev", false}, // dev build: never upgradeable (fail closed)
 		{"garbage", "v0.3.1", false},
 		{"", "v0.3.1", false},
 	}

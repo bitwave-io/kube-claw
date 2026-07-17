@@ -103,12 +103,22 @@ router dispatches to them automatically.
   so agents can install tooling at runtime; the sandbox is the boundary.)
 - **Self-hosted admin UI.** Secrets (rotate, never view), conversations for audit,
   agents (create/edit), base images, prompts, channels.
+- **Self-updating (with a human in the loop).** A tiny always-running supervisor
+  owns the controller's lifecycle: it detects new releases, asks the **upgrade
+  admin** in Slack (or applies automatically / never — `updates.mode`), pins the
+  exact approved image digests, health-watches the rollout, and **auto-rolls-back**
+  a release that doesn't confirm startup.
 
 ---
 
 ## Architecture
 
 ```
+┌── claw-supervisor (self-update plane) ──────────────────────────────────────────────────┐
+│  owns the controller StatefulSet from the ControlPlane CR · polls the release manifest    │
+│  applies approved upgrades (digest-pinned) · health-watches · auto-rolls-back failures    │
+└───────────────────────────────────────┬─────────────────────────────────────────────────┘
+                                        │ owns
                           Slack (Socket Mode)
                                   │  @mention / thread reply / DM
                                   ▼
@@ -214,6 +224,10 @@ claw prompt get claw-agents assistant
 
 claw runs list
 claw runs show <run-id>
+
+claw settings set upgrade-admin U0123     # who approves upgrades (also claimable at onboarding)
+claw upgrade status                       # running/available versions, update phase
+claw upgrade approve v0.5.0               # break-glass approval without Slack
 ```
 
 ---
@@ -314,20 +328,51 @@ behind a port-forward today — add auth + TLS before exposing it.
 **Controller flags** (set via Helm `controller.*` values):
 `--data-dir`, `--runner-image`, `--self-url`, `--ui-base-url`, `--anthropic-secret`
 (K8s secret injected into run pods + the router), `--default-agent`,
-`--enable-router`.
+`--enable-router`. (With chart ≥0.4.0 the supervisor renders these from the
+ControlPlane CR — you still set them as Helm values.)
 
 **Slack** (Helm `slack.*`): `enabled`, `tokenSecretName`, optional static `routes`
 (channels self-configure via onboarding otherwise).
 
-One Helm chart, `charts/claw` (the control plane). The CRD lives in `charts/crds/`
-as plain manifests applied with `kubectl` (not Helm): Helm only installs `crds/`
-on first install and never upgrades them, so `scripts/install.sh` applies the CRD
-with `kubectl apply -f charts/crds/` directly — making install **and** upgrade work.
+One Helm chart, `charts/claw`. The CRDs (`Agent` + `ControlPlane`) live in
+`charts/crds/` as plain manifests applied with `kubectl` (not Helm): Helm only
+installs `crds/` on first install and never upgrades them, so `scripts/install.sh`
+applies them with `kubectl apply -f charts/crds/` directly — making install
+**and** upgrade work.
 
-**Images.** The chart defaults to the published Docker Hub images
-(`docker.io/bitwavecode/kube-claw-controller` + `kube-claw-runner`, tag `latest`).
-Pin a tag with `IMAGE_TAG=v0.2.0 ./scripts/install.sh`, or point at your own registry
-with the `IMAGE_REPO` / `RUNNER_IMAGE` env vars (see below).
+**Images & versions.** The chart pins one release `version` (an immutable image
+tag — never `latest`) used for the controller, runner, and supervisor images
+(`docker.io/bitwavecode/kube-claw-{controller,runner,supervisor}`). Pin a
+release with `VERSION=0.5.0 ./scripts/install.sh`, or point at your own registry
+with `IMAGE_REPO` / `RUNNER_REPO` / `SUPERVISOR_REPO` (see below).
+
+### Self-updates
+
+From chart 0.4.0 the chart installs **`claw-supervisor`** — a deliberately tiny
+reconciler that owns the controller StatefulSet via the `ControlPlane` CR
+(DESIGN.md §24) — instead of templating the controller directly. It polls the
+published release manifest (digest-pinned image refs), and `updates.mode`
+decides who may move the running version:
+
+| mode | behavior |
+|---|---|
+| `prompt` (default) | The bot DMs the **upgrade admin** — release notes + **[Upgrade] [Skip this version] [Remind me later]**. Approval applies the manifest's exact digests. |
+| `auto` | New releases apply unprompted (still digest-pinned + health-watched); the bot announces "upgraded ✅" afterwards. |
+| `manual` | Only `helm upgrade` moves the version; new releases are announced, never self-applied. |
+
+In **every** mode: the supervisor health-watches the rollout (success = the new
+controller confirming startup, not merely pod-Ready) and **auto-rolls-back** to
+the previous digests on a missed deadline — including bad *helm-driven*
+upgrades. Releases that change the chart/RBAC (`requiresHelmUpgrade`), or a
+custom registry, degrade to notify-only. Releases flagged `containsMigration`
+are never auto-rolled-back (old code on a new schema); the controller snapshots
+its SQLite DB to `claw.db.pre-<version>` before migrating, and the supervisor
+holds `Degraded` and pages the admin instead.
+
+The **upgrade admin** is claimed with one button during channel onboarding
+(first claim wins, only while unset), and overridable via
+`claw settings set upgrade-admin U0123` or the `/ui/settings` page. Break-glass
+without Slack: `claw upgrade approve <version>` (admin credential).
 
 ---
 
@@ -341,6 +386,7 @@ controller/runner, or add a new agent **base image** (extra CLIs/tooling).
 | Dockerfile | Image | Role |
 |---|---|---|
 | `Dockerfile` | `kube-claw-controller` | control plane |
+| `Dockerfile.supervisor` | `kube-claw-supervisor` | self-update plane (owns the controller) |
 | `Dockerfile.runner` | `kube-claw-runner` | distroless agent loop (no shell) |
 | `Dockerfile.runner-bash` | `kube-claw-runner-bash` | generic base: bash + curl + CA certs |
 | `images/gcloud/Dockerfile` | `kube-claw-gcloud` | base image: Google Cloud SDK (`gcloud`, `bq`) |
@@ -357,16 +403,18 @@ Prod nodes are typically amd64, so build for `linux/amd64`:
 ```bash
 REG=docker.io/yourname   # or ghcr.io/yourorg, REGION-docker.pkg.dev/PROJECT/REPO
 
-docker buildx build --platform linux/amd64 -f Dockerfile          -t $REG/kube-claw-controller:dev --push .
-docker buildx build --platform linux/amd64 -f Dockerfile.runner   -t $REG/kube-claw-runner:dev     --push .
+docker buildx build --platform linux/amd64 -f Dockerfile            -t $REG/kube-claw-controller:dev --push .
+docker buildx build --platform linux/amd64 -f Dockerfile.runner     -t $REG/kube-claw-runner:dev     --push .
+docker buildx build --platform linux/amd64 -f Dockerfile.supervisor -t $REG/kube-claw-supervisor:dev --push .
 docker buildx build --platform linux/amd64 -f images/gcloud/Dockerfile -t $REG/kube-claw-gcloud:dev --push .
 ```
 
-Install against your images:
+Install against your images (custom registries run self-update in notify-only
+mode unless you publish your own release manifest — see `updates.manifestURL`):
 
 ```bash
-IMAGE_REPO=$REG/kube-claw-controller IMAGE_TAG=dev \
-RUNNER_IMAGE=$REG/kube-claw-runner:dev ./scripts/install.sh
+IMAGE_REPO=$REG/kube-claw-controller RUNNER_REPO=$REG/kube-claw-runner \
+SUPERVISOR_REPO=$REG/kube-claw-supervisor VERSION=dev ./scripts/install.sh
 ```
 
 Register a custom **base image** so agents can reference it (CLI or the admin UI):
@@ -382,9 +430,10 @@ No registry needed — build locally and import into a k3d node:
 
 ```bash
 k3d cluster create claw-dev
-make images                         # builds kube-claw-controller:dev + kube-claw-runner:dev locally
-k3d image import kube-claw-controller:dev kube-claw-runner:dev -c claw-dev
-IMAGE_REPO=kube-claw-controller IMAGE_TAG=dev RUNNER_IMAGE=kube-claw-runner:dev ./scripts/install.sh
+make images        # builds kube-claw-{controller,runner,supervisor}:dev locally
+k3d image import kube-claw-controller:dev kube-claw-runner:dev kube-claw-supervisor:dev -c claw-dev
+IMAGE_REPO=kube-claw-controller RUNNER_REPO=kube-claw-runner \
+SUPERVISOR_REPO=kube-claw-supervisor VERSION=dev ./scripts/install.sh
 ```
 
 GKE Artifact Registry users: `scripts/build-push-gke.sh` builds + pushes to GAR and
@@ -425,10 +474,13 @@ Code layout:
 |---|---|
 | `api/v1alpha1` | the `Agent` CRD |
 | `cmd/claw-controller` | control-plane entrypoint |
+| `cmd/claw-supervisor` | self-update plane entrypoint (DESIGN.md §24) |
 | `cmd/claw-runner` | the agent loop (Claude tool-use) |
 | `cmd/claw-bootstrap` | PID1: `/login` → materialize → exec runner |
 | `cmd/claw` | the `claw` CLI |
 | `internal/controller` | the Agent reconciler |
+| `internal/supervisor` | ControlPlane reconciler + release poller + rollback watchdog |
+| `internal/upgrade` | controller-side upgrade coordinator (Slack prompt, approvals, startup-confirm) |
 | `internal/runengine` | gate-on-grants + launch Jobs |
 | `internal/secrets` | the secret authority (Tink) |
 | `internal/identity` | `/login` attestation + session tokens |
@@ -447,7 +499,9 @@ MVP, actively developed. Working: the agent loop, secret authority + grants,
 on-demand `request_secret`, warm multi-turn sessions with history replay, the
 Slack connector (routing, onboarding, reactions), external connectors (API-key
 ingest + signed callbacks), git-repo access grants (read/write, request→approve),
-the LLM agent router, the base-image registry, and the admin UI.
+the LLM agent router, the base-image registry, the admin UI, and the
+self-update plane (supervisor-owned controller, Slack-approved digest-pinned
+upgrades, auto-rollback).
 
 **Not yet done / hardening:** auth + TLS on the rest of the `/v1` API (connector
 ingest/management are authenticated; the core API is still cluster-internal

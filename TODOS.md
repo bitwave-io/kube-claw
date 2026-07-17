@@ -52,7 +52,9 @@ Deferred work captured during the v0.2 eng review (2026-06-20). Not MVP-blocking
 - **Cons:** Each provider is its own verification + trust model.
 - **Depends on:** identity interface (in v0.2 design).
 
-## T-8 — Self-update plane (`claw-supervisor`)
+## T-8 — Self-update plane (`claw-supervisor`) — ✅ IMPLEMENTED (2026-07-16)
+- **Status:** Phases 8a–8e built (see DESIGN.md §24 status note). Remaining: live
+  kind/k3d e2e of the rollback path, and T-9 signing.
 - **What:** The chart installs a tiny always-running supervisor that owns the controller StatefulSet, polls a digest-pinned release manifest, asks the upgrade admin in Slack (mode `prompt|auto|manual` set at helm install), applies updates, health-watches the rollout, and auto-rolls-back on failure. Full design: **DESIGN.md §24** (ControlPlane CRD, manifest schema, values surface, Phases 8a–8e).
 - **Why:** Upgrades today are manual `install.sh` reruns; a controller that patches its own StatefulSet can't roll itself back — the updater must survive the update.
 - **Pros:** One-button (or zero-button) upgrades; the rollback watchdog also covers helm-driven upgrades; the chart becomes nearly frozen; kills the `latest`-tag default in favor of pinned digests.

@@ -779,6 +779,13 @@ Logs: structured JSON with run/agent/namespace/request/grant IDs. Never secret v
 _(Designed 2026-07-16, post-MVP. Nothing here blocks Phase 7. Implementation is
 tracked as Phases 8a–8e below / TODOS T-8.)_
 
+> **Status (2026-07-16): Phases 8a–8e implemented** — `cmd/claw-supervisor` +
+> `internal/supervisor` (reconciler, poller, watchdog, notifier),
+> `internal/upgrade` (controller-side coordinator), the ControlPlane CRD, chart
+> 0.4.0, the CI manifest-publishing job, and unit + envtest coverage. Not yet
+> live-tested on a cluster (kind/k3d e2e of the rollback path remains); manifest
+> signing is T-9.
+
 ### 24.1 Problem & shape
 
 kube-claw should detect new releases, ask a human in Slack for permission,
