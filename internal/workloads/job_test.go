@@ -8,7 +8,7 @@ import (
 
 func TestBuildRunJob(t *testing.T) {
 	run := store.Run{ID: "run-abc", AgentName: "gcp-cost", AgentNamespace: "claw-agents", SessionID: "1782140687.401159"}
-	job := BuildRunJob(run, "claw-runner:dev", "http://claw-controller.claw-system.svc:8443", "why did cost spike?", "You are a cost bot.", "claw-anthropic-key", "10m")
+	job := BuildRunJob(run, "claw-runner:dev", "http://claw-controller.claw-system.svc:8443", "why did cost spike?", "You are a cost bot.", "claude-sonnet-5", "claw-anthropic-key", "10m")
 
 	if job.Name != "run-abc" || job.Namespace != "claw-agents" {
 		t.Fatalf("job name/ns = %s/%s", job.Name, job.Namespace)
@@ -32,6 +32,9 @@ func TestBuildRunJob(t *testing.T) {
 	}
 	if env["CLAW_SYSTEM_PROMPT"] != "You are a cost bot." {
 		t.Errorf("CLAW_SYSTEM_PROMPT = %q", env["CLAW_SYSTEM_PROMPT"])
+	}
+	if env["CLAW_MODEL"] != "claude-sonnet-5" {
+		t.Errorf("CLAW_MODEL = %q, want claude-sonnet-5", env["CLAW_MODEL"])
 	}
 	if env["CLAW_IDLE_TIMEOUT"] != "10m" || env["CLAW_SESSION_ID"] != "1782140687.401159" {
 		t.Errorf("idle/session env = %q / %q", env["CLAW_IDLE_TIMEOUT"], env["CLAW_SESSION_ID"])

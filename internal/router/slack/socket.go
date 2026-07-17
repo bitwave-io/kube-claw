@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"html"
 	"strings"
 
 	"github.com/slack-go/slack"
@@ -82,7 +83,7 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 			lg.Info("posted onboarding prompt", "channel", e.Channel, "inviter", e.Inviter)
 		}
 	case *slackevents.AppMentionEvent:
-		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), e.Text, true, e.User)
+		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), r.agentText(e.User, e.Text), true, e.User)
 		if err != nil {
 			lg.Error(err, "handle app_mention")
 		} else if runID != "" {
@@ -103,10 +104,14 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 			}
 			return
 		}
+		// Detect an @mention of the bot before stripping it out (a mention arrives
+		// as both app_mention and message events; SeenEvent dedupes by timestamp,
+		// so whichever path runs first must treat it as an explicit request).
+		mentioned := r.BotUserID != "" && strings.Contains(e.Text, "<@"+r.BotUserID+">")
 		// A reply in a thread the bot started continues that conversation (no
 		// @mention needed); otherwise fall back to route matching.
 		if e.ThreadTimeStamp != "" && e.ThreadTimeStamp != e.TimeStamp {
-			if runID, err := r.HandleThreadReply(ctx, e.TimeStamp, e.Channel, e.ThreadTimeStamp, e.Text, e.User); err != nil {
+			if runID, err := r.HandleThreadReply(ctx, e.TimeStamp, e.Channel, e.ThreadTimeStamp, r.agentText(e.User, e.Text), mentioned, e.User); err != nil {
 				lg.Error(err, "handle thread reply")
 			} else if runID != "" {
 				lg.Info("created follow-up run from thread reply", "run", runID, "channel", e.Channel)
@@ -114,7 +119,7 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 				return
 			}
 		}
-		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), e.Text, false, e.User)
+		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), r.agentText(e.User, e.Text), mentioned, e.User)
 		if err != nil {
 			lg.Error(err, "handle message")
 		} else if runID != "" {
@@ -122,6 +127,21 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 			r.react(ctx, e.Channel, e.TimeStamp)
 		}
 	}
+}
+
+// agentText turns a raw Slack message into the text the agent sees: the bot's
+// own @mention is stripped (it's addressing, not content), Slack's &amp;/&lt;/&gt;
+// escapes are undone, and the sender's id is prefixed (<@U…>: …) so the agent
+// can tell speakers apart in multi-user threads.
+func (r *Router) agentText(user, text string) string {
+	if r.BotUserID != "" {
+		text = strings.ReplaceAll(text, "<@"+r.BotUserID+">", "")
+	}
+	text = strings.TrimSpace(html.UnescapeString(text))
+	if user == "" || text == "" {
+		return text
+	}
+	return "<@" + user + ">: " + text
 }
 
 // react adds a 👀 to the triggering message the moment we start a run, so the

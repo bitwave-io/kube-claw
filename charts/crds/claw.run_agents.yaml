@@ -81,6 +81,12 @@ spec:
               model:
                 description: Model configures the LLM provider and system prompt.
                 properties:
+                  model:
+                    description: |-
+                      Model overrides the Anthropic model the runner's agent loop uses
+                      (e.g. "claude-sonnet-5" for cheaper routine agents). Empty → the
+                      runner's default (Opus).
+                    type: string
                   providerRef:
                     type: string
                   systemPrompt:
