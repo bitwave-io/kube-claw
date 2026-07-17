@@ -6,6 +6,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -269,6 +270,11 @@ func (r *Reconciler) failUpdate(ctx context.Context, cp *clawv1alpha1.ControlPla
 	if err := r.Update(ctx, &sts); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Kubernetes "forced rollback" caveat: an OrderedReady StatefulSet whose
+	// update is stuck on a never-Ready pod (ImagePullBackOff, crash-before-
+	// ready) does NOT recover when the template is reverted — the stuck pod
+	// must be deleted so the controller recreates it at the reverted revision.
+	r.deleteStuckPods(ctx, cp.Namespace)
 
 	// A failed approval must not re-apply on the next reconcile: clear it.
 	if cp.Annotations[clawv1alpha1.AnnotationApprovedVersion] == target {
@@ -286,6 +292,38 @@ func (r *Reconciler) failUpdate(ctx context.Context, cp *clawv1alpha1.ControlPla
 		":warning: kube-claw upgrade to *%s* did not confirm startup — rolling back to *%s*. I won't retry this release.",
 		target, orUnknown(cp.Status.PreviousVersion)))
 	return ctrl.Result{RequeueAfter: watchdogPoll}, nil
+}
+
+// deleteStuckPods best-effort deletes non-Ready controller pods after a
+// rollback template revert (see the forced-rollback note at the call site).
+func (r *Reconciler) deleteStuckPods(ctx context.Context, namespace string) {
+	lg := logf.FromContext(ctx)
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(namespace),
+		client.MatchingLabels{"app.kubernetes.io/name": appLabel}); err != nil {
+		lg.Error(err, "list controller pods for stuck-pod cleanup")
+		return
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if podReady(p) {
+			continue
+		}
+		if err := r.Delete(ctx, p); err != nil && !apierrors.IsNotFound(err) {
+			lg.Error(err, "delete stuck controller pod", "pod", p.Name)
+		} else {
+			lg.Info("deleted stuck controller pod so the revert can proceed", "pod", p.Name)
+		}
+	}
+}
+
+func podReady(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // pastDeadline reports whether the confirm deadline for an in-flight update

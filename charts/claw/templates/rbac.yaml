@@ -75,6 +75,12 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Stuck-pod cleanup on rollback: a reverted StatefulSet template does not
+  # recover a never-Ready pod on its own (k8s forced-rollback caveat) — the
+  # supervisor deletes it so the revert proceeds.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

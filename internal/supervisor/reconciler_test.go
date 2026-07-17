@@ -7,6 +7,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -252,9 +253,26 @@ func TestReconcileRollback(t *testing.T) {
 	}
 	reconcile(t, r)
 
+	// A stuck (never-Ready) controller pod from the broken rollout: Kubernetes
+	// won't replace it on template revert (forced-rollback caveat) — the
+	// supervisor must delete it.
+	stuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "claw-controller-0", Namespace: "claw-system",
+			Labels: map[string]string{"app.kubernetes.io/name": "claw-controller"}},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}},
+	}
+	if err := c.Create(ctx, stuck); err != nil {
+		t.Fatal(err)
+	}
+
 	// The new version never confirms; the deadline passes.
 	now = now.Add(11 * time.Minute)
 	reconcile(t, r)
+
+	var gone corev1.Pod
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "claw-system", Name: "claw-controller-0"}, &gone); err == nil {
+		t.Fatal("stuck pod must be deleted on rollback")
+	}
 
 	sts := getSTS(t, c)
 	if img := currentImage(sts); img != "docker.io/bitwavecode/kube-claw-controller:0.4.0" {
