@@ -40,16 +40,20 @@ func main() {
 		fatal(fmt.Sprintf("read SA token: %v", err))
 	}
 
-	clawTok, err := login(ctrl, runID, string(bytes.TrimSpace(saToken)))
+	lr, err := login(ctrl, runID, string(bytes.TrimSpace(saToken)))
 	if err != nil {
 		fatal(fmt.Sprintf("login: %v", err))
 	}
-	mats, err := materialize(ctrl, runID, clawTok)
+	mats, err := materialize(ctrl, runID, lr.Token)
 	if err != nil {
 		fatal(fmt.Sprintf("materialize: %v", err))
 	}
 
-	env := append(os.Environ(), "CLAW_TOKEN="+clawTok)
+	env := append(os.Environ(),
+		"CLAW_TOKEN="+lr.Token,
+		"CLAW_REFRESH_TOKEN="+lr.RefreshToken,
+		"CLAW_TOKEN_EXPIRES_AT="+strconv.FormatInt(lr.ExpiresAt, 10),
+	)
 	type manifestEntry struct {
 		Name, Description, Path string
 	}
@@ -110,18 +114,22 @@ type matSecret struct {
 	Content     string            `json:"content"`
 }
 
-func login(ctrl, runID, saToken string) (string, error) {
+type loginResult struct {
+	Token        string `json:"token"`
+	RefreshToken string `json:"refreshToken"`
+	ExpiresAt    int64  `json:"expiresAt"`
+}
+
+func login(ctrl, runID, saToken string) (loginResult, error) {
 	body, _ := json.Marshal(map[string]string{"token": saToken, "runId": runID})
-	var out struct {
-		Token string `json:"token"`
-	}
+	var out loginResult
 	if err := postJSON(ctrl+"/v1/login", "", body, &out); err != nil {
-		return "", err
+		return out, err
 	}
 	if out.Token == "" {
-		return "", fmt.Errorf("empty session token")
+		return out, fmt.Errorf("empty session token")
 	}
-	return out.Token, nil
+	return out, nil
 }
 
 func materialize(ctrl, runID, clawTok string) ([]matSecret, error) {

@@ -107,6 +107,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/secret-grants", s.listGrants)
 	mux.HandleFunc("POST /v1/secret-grants/{id}/revoke", s.revokeGrant)
 	mux.HandleFunc("POST /v1/login", s.login)
+	mux.HandleFunc("POST /v1/token/refresh", s.refreshToken)
 	mux.HandleFunc("POST /v1/runs/{id}/materialize", s.materialize)
 	mux.HandleFunc("POST /v1/base-images", s.createBaseImage)
 	mux.HandleFunc("GET /v1/base-images", s.listBaseImages)
@@ -425,12 +426,20 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 		req.Kind = "text"
 	}
 	var run store.Run
+	alreadyDone := false
 	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
 		got, e := tx.GetRun(id)
 		if e != nil {
 			return e
 		}
 		run = got
+		// Idempotency: a completed run's reply must not post to Slack twice
+		// (runner retry after a timed-out-but-delivered POST, Job backoff
+		// replacement pods, claim/launch races all re-send outputs).
+		if run.Phase == "Succeeded" {
+			alreadyDone = true
+			return nil
+		}
 		if e := tx.AppendOutput(id, store.Output{Kind: req.Kind, Content: req.Content}); e != nil {
 			return e
 		}
@@ -445,6 +454,11 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if alreadyDone {
+		logf.Log.WithName("apihttp").Info("duplicate output ignored — run already succeeded", "run", id)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "already recorded"})
 		return
 	}
 	// A "none" output is the agent declining to reply (the message wasn't for
