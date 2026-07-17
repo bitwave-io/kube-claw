@@ -61,9 +61,9 @@ Deferred work captured during the v0.2 eng review (2026-06-20). Not MVP-blocking
 - **Cons:** New binary + a second CRD kind (`ControlPlane` — infrastructure, not user-facing; `Agent` stays the only user resource); a Slack button changes running control-plane code (mitigated by digest pinning, stored-admin identity, notify-only degradation for chart-level releases; signing is T-9); schema migrations constrain rollback (pre-migration SQLite snapshot + additive-only policy).
 - **Depends on:** Phases 0–6 (done); a release pipeline that publishes the version manifest; §8.1 Slack interaction machinery (reused for the upgrade buttons).
 
-## T-9 — Release-manifest signing
-- **What:** Sign the release manifest (cosign or minisign); the supervisor verifies the signature before applying, with the public key baked into the supervisor image.
-- **Why:** In `auto` mode a compromised manifest endpoint is in-cluster code execution; until then the only anchors are HTTPS + the chart-pinned manifest URL (DESIGN.md §24.7 trust note).
-- **Pros:** Closes the strongest residual supply-chain risk of T-8; cheap to verify at apply time.
-- **Cons:** Key management + rotation story for the publisher; a lost signing key blocks releases until rotated.
-- **Depends on:** T-8 (manifest schema reserves the field).
+## T-9 — Release-manifest signing — ✅ IMPLEMENTED (2026-07-16)
+- **Status:** ed25519 detached signature (`manifest-stable.json.sig`), verified stdlib-only in the supervisor; fail-closed when `updates.manifestPublicKey` (PEM) is set, unsigned mode otherwise. CI signs when the `MANIFEST_SIGNING_KEY` secret exists. **To enable:** `openssl genpkey -algorithm ed25519 -out manifest-signing.key && openssl pkey -in manifest-signing.key -pubout` → store the private key as the GitHub secret, put the public PEM in values.
+- **What:** Sign the release manifest; the supervisor verifies before applying.
+- **Why:** In `auto` mode a compromised manifest endpoint is in-cluster code execution; HTTPS + the chart-pinned URL was the only anchor.
+- **Cons (standing):** a lost signing key blocks signed releases until the value-side key rotates with it; no key-rotation overlap scheme (single key).
+- **Depends on:** T-8 (done).

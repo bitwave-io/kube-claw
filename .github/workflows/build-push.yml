@@ -138,6 +138,27 @@ jobs:
              + $flags' > manifest-stable.json
           cat manifest-stable.json
 
+      # Manifest signing (T-9): a detached ed25519 signature over the exact
+      # manifest bytes. Enable by storing a PEM private key as the
+      # MANIFEST_SIGNING_KEY repo secret (openssl genpkey -algorithm ed25519)
+      # and baking the matching public key into installs via the
+      # updates.manifestPublicKey Helm value. Without the secret the manifest
+      # publishes unsigned (installs without a configured key accept that).
+      - name: Sign manifest
+        env:
+          SIGNING_KEY: ${{ secrets.MANIFEST_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SIGNING_KEY" ]]; then
+            echo "MANIFEST_SIGNING_KEY not configured — publishing unsigned"
+            exit 0
+          fi
+          printf '%s\n' "$SIGNING_KEY" > signing-key.pem
+          openssl pkeyutl -sign -rawin -inkey signing-key.pem \
+            -in manifest-stable.json -out manifest-stable.json.sig
+          rm -f signing-key.pem
+          echo "signed manifest-stable.json ($(wc -c < manifest-stable.json.sig) byte signature)"
+
       - name: Create release + upload manifest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -146,3 +167,6 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/}"
           gh release view "$VERSION" >/dev/null 2>&1 ||             gh release create "$VERSION" --title "$VERSION" --generate-notes
           gh release upload "$VERSION" manifest-stable.json --clobber
+          if [[ -f manifest-stable.json.sig ]]; then
+            gh release upload "$VERSION" manifest-stable.json.sig --clobber
+          fi

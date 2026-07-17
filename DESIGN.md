@@ -920,9 +920,14 @@ Rules:
 - **Custom registries** (`IMAGE_REPO=…` installs): Docker Hub digests are
   meaningless there — the supervisor forces manual behavior and sets a status
   condition, unless the operator points `manifestURL` at their own manifest.
-- Manifest **signing** (cosign/minisign) is deferred to **T-9**; the schema
-  reserves room. Until then the trust anchor is HTTPS + the chart-pinned URL —
-  see §24.7.
+- Manifest **signing** (T-9, implemented): a detached **ed25519** signature
+  over the exact manifest bytes at `<manifestURL>.sig`. CI signs with the
+  `MANIFEST_SIGNING_KEY` repo secret; installs pin the PEM public key via the
+  `updates.manifestPublicKey` value (→ `CLAW_MANIFEST_PUBKEY`). With a key
+  configured the supervisor **fails closed** — a missing or invalid signature
+  rejects the manifest. The trust anchor deliberately lives in Helm values,
+  never on the manifest host. Without a key: unsigned mode (HTTPS + the
+  chart-pinned URL, the pre-T-9 posture).
 
 ### 24.4 Update modes
 
@@ -1080,8 +1085,9 @@ Phase 8e  Watchdog + rollback: startup-confirmed signal (controller writes
           broken migration release holds Degraded and pages instead of rolling back.
 ```
 
-Deferred: manifest signing (**T-9**), channels beyond `stable`, soak delay for
-auto mode, supervisor announcing updates to *itself*.
+Deferred: channels beyond `stable`, soak delay for auto mode, supervisor
+announcing updates to *itself*. (T-9 manifest signing: implemented — ed25519
+detached signatures, fail-closed when `updates.manifestPublicKey` is set.)
 
 ### 24.10 Open questions (carry into the build)
 

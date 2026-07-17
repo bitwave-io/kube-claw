@@ -369,6 +369,13 @@ are never auto-rolled-back (old code on a new schema); the controller snapshots
 its SQLite DB to `claw.db.pre-<version>` before migrating, and the supervisor
 holds `Degraded` and pages the admin instead.
 
+**Manifest signing.** Releases are signed with a detached ed25519 signature.
+Set `updates.manifestPublicKey` (PEM) and the supervisor refuses any manifest
+whose `<url>.sig` doesn't verify — fail closed. Generate the pair with
+`openssl genpkey -algorithm ed25519 -out manifest-signing.key && openssl pkey
+-in manifest-signing.key -pubout`, store the private key as the
+`MANIFEST_SIGNING_KEY` GitHub Actions secret, and put the public key in values.
+
 The **upgrade admin** is claimed with one button during channel onboarding
 (first claim wins, only while unset), and overridable via
 `claw settings set upgrade-admin U0123` or the `/ui/settings` page. Break-glass

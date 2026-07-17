@@ -44,6 +44,12 @@ spec:
                   name: {{ .Values.slack.tokenSecretName }}
                   key: bot-token
                   optional: true
+            {{- with .Values.updates.manifestPublicKey }}
+            # Manifest signing trust anchor (T-9): with this set, an unsigned
+            # or tampered manifest is rejected outright.
+            - name: CLAW_MANIFEST_PUBKEY
+              value: {{ . | quote }}
+            {{- end }}
           ports:
             - name: probe
               containerPort: 8081

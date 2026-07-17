@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"crypto/ed25519"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -22,7 +23,10 @@ type Poller struct {
 	client.Client
 	Namespace       string
 	DefaultInterval time.Duration
-	// Fetch is injectable for tests; defaults to FetchManifest.
+	// PubKey verifies the manifest's detached signature (T-9). nil = unsigned
+	// mode; set = fail closed on a missing/invalid signature.
+	PubKey ed25519.PublicKey
+	// Fetch is injectable for tests; defaults to FetchManifestSigned with PubKey.
 	Fetch func(ctx context.Context, url string) (Manifest, error)
 	// Now is injectable for tests; defaults to time.Now.
 	Now func() time.Time
@@ -86,7 +90,9 @@ func (p *Poller) pollOne(ctx context.Context, cp *clawv1alpha1.ControlPlane) err
 	lg := logf.Log.WithName("release-poller")
 	fetch := p.Fetch
 	if fetch == nil {
-		fetch = FetchManifest
+		fetch = func(ctx context.Context, url string) (Manifest, error) {
+			return FetchManifestSigned(ctx, url, p.PubKey)
+		}
 	}
 	url := cp.Spec.Updates.ManifestURL
 	if url == "" {
