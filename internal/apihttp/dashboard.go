@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/store"
+	"github.com/traego/kube-claw/internal/version"
 )
 
 // The self-hosted admin dashboard (DESIGN.md §UI): secrets (rotate, never view),
@@ -58,6 +60,7 @@ button{font:inherit;padding:.3rem .7rem;border:1px solid var(--accent);backgroun
 <a href=/ui/base-images class="{{if eq .Active "images"}}on{{end}}">Images</a>
 <a href=/ui/prompts class="{{if eq .Active "prompts"}}on{{end}}">Prompts</a>
 <a href=/ui/channels class="{{if eq .Active "channels"}}on{{end}}">Channels</a>
+<a href=/ui/settings class="{{if eq .Active "settings"}}on{{end}}">Settings</a>
 </nav><main><h1>{{.Title}}</h1>`
 
 const dashFoot = `</main></body></html>`
@@ -487,6 +490,34 @@ func (s *Server) channelsPage(w http.ResponseWriter, r *http.Request) {
 <td class=mut>{{.UpdatedAt}}</td>
 </tr>{{else}}<tr><td colspan=5 class=mut>No channels configured yet — add the bot to a channel.</td></tr>{{end}}</table>`
 	s.renderDash(w, "channels", "Channels", body, cfgs)
+}
+
+// settingsPage shows install-wide settings: the running version and the
+// upgrade admin (DESIGN.md §24.6), with a form to override the admin.
+func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
+	data := struct{ Version, Admin, Skipped string }{Version: version.Get()}
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		data.Admin, _ = tx.GetSetting(store.SettingUpgradeAdmin)
+		data.Skipped, _ = tx.GetSetting(store.SettingSkippedVersion)
+		return nil
+	})
+	body := `<p class=mut>Running controller version: <code>{{.D.Version}}</code>{{if .D.Skipped}} · skipped release: <code>{{.D.Skipped}}</code>{{end}}</p>
+<h2>Upgrade admin</h2>
+<p class=mut>The Slack user asked to approve kube-claw upgrades. Claimed during channel onboarding; override it here or with <code>claw settings set upgrade-admin U…</code>.</p>
+<form method=post action=/ui/settings>
+<label>Slack user id <input name=upgradeAdmin value="{{.D.Admin}}" placeholder="U0123456789"></label>
+<button type=submit>Save</button>
+</form>`
+	s.renderDash(w, "settings", "Settings", body, data)
+}
+
+// uiSetSettings applies the settings form (today: the upgrade admin).
+func (s *Server) uiSetSettings(w http.ResponseWriter, r *http.Request) {
+	admin := strings.TrimSpace(r.FormValue("upgradeAdmin"))
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		return tx.SetSetting(store.SettingUpgradeAdmin, admin)
+	})
+	http.Redirect(w, r, "/ui/settings", http.StatusSeeOther)
 }
 
 // jsonField pulls a string field out of an opaque JSON blob (run Source/Input).

@@ -51,3 +51,17 @@ Deferred work captured during the v0.2 eng review (2026-06-20). Not MVP-blocking
 - **Pros:** First-class pluggable identity realized.
 - **Cons:** Each provider is its own verification + trust model.
 - **Depends on:** identity interface (in v0.2 design).
+
+## T-8 — Self-update plane (`claw-supervisor`)
+- **What:** The chart installs a tiny always-running supervisor that owns the controller StatefulSet, polls a digest-pinned release manifest, asks the upgrade admin in Slack (mode `prompt|auto|manual` set at helm install), applies updates, health-watches the rollout, and auto-rolls-back on failure. Full design: **DESIGN.md §24** (ControlPlane CRD, manifest schema, values surface, Phases 8a–8e).
+- **Why:** Upgrades today are manual `install.sh` reruns; a controller that patches its own StatefulSet can't roll itself back — the updater must survive the update.
+- **Pros:** One-button (or zero-button) upgrades; the rollback watchdog also covers helm-driven upgrades; the chart becomes nearly frozen; kills the `latest`-tag default in favor of pinned digests.
+- **Cons:** New binary + a second CRD kind (`ControlPlane` — infrastructure, not user-facing; `Agent` stays the only user resource); a Slack button changes running control-plane code (mitigated by digest pinning, stored-admin identity, notify-only degradation for chart-level releases; signing is T-9); schema migrations constrain rollback (pre-migration SQLite snapshot + additive-only policy).
+- **Depends on:** Phases 0–6 (done); a release pipeline that publishes the version manifest; §8.1 Slack interaction machinery (reused for the upgrade buttons).
+
+## T-9 — Release-manifest signing
+- **What:** Sign the release manifest (cosign or minisign); the supervisor verifies the signature before applying, with the public key baked into the supervisor image.
+- **Why:** In `auto` mode a compromised manifest endpoint is in-cluster code execution; until then the only anchors are HTTPS + the chart-pinned manifest URL (DESIGN.md §24.7 trust note).
+- **Pros:** Closes the strongest residual supply-chain risk of T-8; cheap to verify at apply time.
+- **Cons:** Key management + rotation story for the publisher; a lost signing key blocks releases until rotated.
+- **Depends on:** T-8 (manifest schema reserves the field).

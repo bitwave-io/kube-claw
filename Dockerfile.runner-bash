@@ -10,8 +10,9 @@ RUN go mod download
 COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/claw-runner ./cmd/claw-runner && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/claw-bootstrap ./cmd/claw-bootstrap
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X github.com/traego/kube-claw/internal/version.Version=${VERSION}" -o /out/claw-runner ./cmd/claw-runner && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X github.com/traego/kube-claw/internal/version.Version=${VERSION}" -o /out/claw-bootstrap ./cmd/claw-bootstrap
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates bash curl && rm -rf /var/lib/apt/lists/*

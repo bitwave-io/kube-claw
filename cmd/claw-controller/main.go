@@ -39,6 +39,7 @@ import (
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
 	"github.com/traego/kube-claw/internal/store/sqlite"
+	"github.com/traego/kube-claw/internal/version"
 )
 
 var scheme = runtime.NewScheme()
@@ -271,7 +272,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info("starting claw-controller")
+	log.Info("starting claw-controller", "version", version.Get())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "manager exited with error")
 		os.Exit(1)

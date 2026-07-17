@@ -76,10 +76,17 @@ func slackSource(source string) slackSrc {
 	return s
 }
 
+// adminClaimValue is the interaction value of the "make me the upgrade admin"
+// onboarding button. The claiming user is the clicker (from the callback), so
+// the value carries no payload.
+const adminClaimValue = "adminclaim"
+
 // PostOnboarding DMs the inviter (or posts in-channel) asking how the bot should
 // behave in a channel it was just added to: active vs @-only, and in-channel vs
-// threads-only. Each button stores a channel config when clicked.
-func (n *Notifier) PostOnboarding(ctx context.Context, target, channel, ns, agent string) error {
+// threads-only. Each button stores a channel config when clicked. offerAdmin
+// additionally offers the upgrade-admin role (shown only while no admin is set,
+// DESIGN.md §24.6).
+func (n *Notifier) PostOnboarding(ctx context.Context, target, channel, ns, agent string, offerAdmin bool) error {
 	intro := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn",
 		fmt.Sprintf(":wave: Hi! I'm an AI assistant you can put to work right here in Slack — ask me a question and I'll spin up a sandboxed agent (`%s`) to answer. You just added me to <#%s>, so I need to know how you'd like me to behave in *this* channel.",
 			agent, channel), false, false), nil, nil)
@@ -102,7 +109,17 @@ func (n *Notifier) PostOnboarding(ctx context.Context, target, channel, ns, agen
 		mk(2, "Only @mentions · in channel", true, false),
 		mk(3, "Only @mentions · in thread", true, true),
 	)
-	_, _, err := n.api.PostMessageContext(ctx, target, slack.MsgOptionBlocks(intro, explain, actions))
+	blocks := []slack.Block{intro, explain, actions}
+	if offerAdmin {
+		blocks = append(blocks,
+			slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn",
+				"*One more thing:* this install has no *upgrade admin* yet — the person I ask before installing a new kube-claw release. Want it to be you? (First to claim it wins; an operator can change it later with `claw settings set upgrade-admin`.)",
+				false, false), nil, nil),
+			slack.NewActionBlock("claw-admin-claim",
+				slack.NewButtonBlockElement("adminclaim", adminClaimValue,
+					slack.NewTextBlockObject("plain_text", "Make me the upgrade admin", false, false))))
+	}
+	_, _, err := n.api.PostMessageContext(ctx, target, slack.MsgOptionBlocks(blocks...))
 	return err
 }
 
@@ -127,6 +144,38 @@ func (n *Notifier) PostAccessRequest(ctx context.Context, granter, secretName, a
 		slack.NewTextBlockObject("plain_text", "Deny", false, false)).WithStyle(slack.StyleDanger)
 	actions := slack.NewActionBlock("claw-access", approve, deny)
 	_, _, err := n.api.PostMessageContext(ctx, granter, slack.MsgOptionBlocks(section, actions))
+	return err
+}
+
+// PostUpgradePrompt DMs the upgrade admin about a new release (DESIGN.md §24.4).
+// canApply=true adds Upgrade / Skip / Later buttons; false is the notify-only
+// degradation (requiresHelmUpgrade, minSupervisorVersion, custom registry, or
+// manual mode) and explains how to upgrade instead.
+func (n *Notifier) PostUpgradePrompt(ctx context.Context, admin, current, available, notes, reason string, containsMigration, canApply bool) error {
+	text := fmt.Sprintf(":arrow_up: *kube-claw %s is available* (you're running %s).", available, current)
+	if notes != "" {
+		text += "\n> " + notes
+	}
+	if containsMigration {
+		text += "\n:warning: This release migrates the database — if it fails I'll hold for a human instead of auto-rolling-back."
+	}
+	section := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn", text, false, false), nil, nil)
+	if !canApply {
+		manual := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn",
+			fmt.Sprintf("This release can't be self-applied (%s) — upgrade with `./scripts/install.sh` when ready.", reason),
+			false, false), nil, nil)
+		_, _, err := n.api.PostMessageContext(ctx, admin, slack.MsgOptionBlocks(section, manual))
+		return err
+	}
+	mk := func(action, label string) *slack.ButtonBlockElement {
+		return slack.NewButtonBlockElement("upg-"+action, UpgradeActionValue(action, available),
+			slack.NewTextBlockObject("plain_text", label, false, false))
+	}
+	actions := slack.NewActionBlock("claw-upgrade",
+		mk("approve", "Upgrade").WithStyle(slack.StylePrimary),
+		mk("skip", "Skip this version"),
+		mk("later", "Remind me later"))
+	_, _, err := n.api.PostMessageContext(ctx, admin, slack.MsgOptionBlocks(section, actions))
 	return err
 }
 

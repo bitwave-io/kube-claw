@@ -143,6 +143,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/prompts/{ns}/{name}", s.getPrompt)
 	mux.HandleFunc("GET /ui/prompts", s.promptsPage)
 	mux.HandleFunc("POST /ui/prompts", s.promptsSubmit)
+	mux.HandleFunc("GET /v1/version", s.getVersion)
+	mux.HandleFunc("GET /v1/settings", s.listSettings)
+	mux.HandleFunc("PUT /v1/settings/{key}", s.setSetting)
 	mux.HandleFunc("GET /v1/schedules", s.listSchedules)
 	mux.HandleFunc("POST /v1/schedules", s.createSchedule)
 	mux.HandleFunc("DELETE /v1/schedules/{id}", s.deleteScheduleAPI)
@@ -170,6 +173,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/agents/edit", s.agentEditPage)
 	mux.HandleFunc("POST /ui/agents/update", s.agentUpdate)
 	mux.HandleFunc("GET /ui/channels", s.channelsPage)
+	mux.HandleFunc("GET /ui/settings", s.settingsPage)
+	mux.HandleFunc("POST /ui/settings", s.uiSetSettings)
 	return s.withAdminAuth(mux)
 }
 

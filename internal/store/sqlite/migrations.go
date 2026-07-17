@@ -212,6 +212,12 @@ var migrations = []string{
 		created_at   TEXT NOT NULL,
 		notified_at  TEXT
 	);`,
+	// Install-wide key/value settings (DESIGN.md §24.6, e.g. the upgrade admin).
+	`CREATE TABLE IF NOT EXISTS settings (
+		key        TEXT PRIMARY KEY,
+		value      TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);`,
 	`CREATE TABLE IF NOT EXISTS channel_configs (
 		channel          TEXT PRIMARY KEY,
 		agent_ns         TEXT NOT NULL,

@@ -32,8 +32,23 @@ func newRootCmd() *cobra.Command {
 		def = "http://localhost:8443"
 	}
 	root.PersistentFlags().StringVar(&controllerURL, "controller-url", def, "controller API base URL")
-	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd(), newAgentsCmd(), newBaseImageCmd(), newPromptCmd(), newScheduleCmd())
+	root.AddCommand(newSecretCmd(), newRunCmd(), newRunsCmd(), newAgentsCmd(), newBaseImageCmd(), newPromptCmd(), newScheduleCmd(), newSettingsCmd())
 	return root
+}
+
+func newSettingsCmd() *cobra.Command {
+	c := &cobra.Command{Use: "settings", Short: "Manage install-wide settings (e.g. the upgrade admin)"}
+	set := &cobra.Command{
+		Use:   "set KEY VALUE",
+		Short: "Set a setting (e.g. `claw settings set upgrade-admin U0123`); needs CLAW_ADMIN_PASSWORD when the admin password is configured",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiJSON(http.MethodPut, "/v1/settings/"+args[0], map[string]any{"value": args[1]}, nil)
+		},
+	}
+	c.AddCommand(set, &cobra.Command{Use: "list", Short: "List settings",
+		RunE: func(_ *cobra.Command, _ []string) error { return apiPrint(http.MethodGet, "/v1/settings") }})
+	return c
 }
 
 func newScheduleCmd() *cobra.Command {
@@ -292,6 +307,14 @@ func newPromptCmd() *cobra.Command {
 
 func httpClient() *http.Client { return &http.Client{Timeout: 15 * time.Second} }
 
+// addAuth attaches the admin basic-auth credential (CLAW_ADMIN_PASSWORD) when
+// set, so admin-gated endpoints (settings, connectors) work from the CLI.
+func addAuth(req *http.Request) {
+	if pw := os.Getenv("CLAW_ADMIN_PASSWORD"); pw != "" {
+		req.SetBasicAuth("admin", pw)
+	}
+}
+
 func apiJSON(method, path string, body any, out any) error {
 	var rdr io.Reader
 	if body != nil {
@@ -303,6 +326,7 @@ func apiJSON(method, path string, body any, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	addAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
 		return err
@@ -323,6 +347,7 @@ func apiRaw(method, path string, body []byte) error {
 	if err != nil {
 		return err
 	}
+	addAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
 		return err
@@ -338,6 +363,7 @@ func apiRaw(method, path string, body []byte) error {
 
 func apiPrint(method, path string) error {
 	req, _ := http.NewRequest(method, controllerURL+path, nil)
+	addAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
 		return err

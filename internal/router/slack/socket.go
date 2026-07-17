@@ -77,7 +77,11 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 		if target == "" {
 			target = e.Channel // no inviter (e.g. created with the app) → ask in-channel
 		}
-		if err := r.Notifier.PostOnboarding(ctx, target, e.Channel, r.agentsNS(), r.DefaultAgent); err != nil {
+		// Offer the upgrade-admin role only in a DM (claiming is personal, not
+		// an in-channel free-for-all) and only while nobody holds it.
+		_, hasAdmin := r.UpgradeAdmin(ctx)
+		offerAdmin := e.Inviter != "" && !hasAdmin
+		if err := r.Notifier.PostOnboarding(ctx, target, e.Channel, r.agentsNS(), r.DefaultAgent, offerAdmin); err != nil {
 			lg.Error(err, "post onboarding")
 		} else {
 			lg.Info("posted onboarding prompt", "channel", e.Channel, "inviter", e.Inviter)
@@ -162,9 +166,14 @@ func (r *Router) onInteractive(ctx context.Context, api *slack.Client, evt socke
 	}
 	for _, a := range cb.ActionCallback.BlockActions {
 		var msg string
-		if strings.HasPrefix(a.Value, "onboard|") {
+		switch {
+		case strings.HasPrefix(a.Value, "onboard|"):
 			msg = r.HandleOnboard(ctx, a.Value)
-		} else {
+		case a.Value == adminClaimValue:
+			msg = r.HandleAdminClaim(ctx, cb.User.ID)
+		case strings.HasPrefix(a.Value, "upgrade|"):
+			msg = r.HandleUpgradeAction(ctx, a.Value, cb.User.ID)
+		default:
 			msg = r.HandleApproval(ctx, a.Value, cb.User.ID)
 		}
 		_, _, _ = api.PostMessage(cb.Channel.ID, slack.MsgOptionText(msg, false))
