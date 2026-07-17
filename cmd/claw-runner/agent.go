@@ -27,7 +27,6 @@ type agentSession struct {
 	tools         []anthropic.ToolUnionParam
 	messages      []anthropic.MessageParam
 	controllerURL string
-	token         string // CLAW_TOKEN, for on-demand secret requests
 	runID         string
 
 	// servedModel is the model ID the API reported serving the last call; the
@@ -111,7 +110,6 @@ func newAgentSession(systemPrompt string) *agentSession {
 		sys:           sys,
 		tools:         []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}},
 		controllerURL: os.Getenv("CLAW_CONTROLLER_URL"),
-		token:         os.Getenv("CLAW_TOKEN"),
 		runID:         os.Getenv("CLAW_RUN_ID"),
 	}
 }
@@ -120,7 +118,7 @@ func newAgentSession(systemPrompt string) *agentSession {
 // + descriptions, never values) to the system prompt, so it uses an existing key
 // by name instead of asking the user for a new one.
 func (s *agentSession) loadAvailableSecrets(ctx context.Context) {
-	if s.controllerURL == "" || s.runID == "" || s.token == "" {
+	if s.controllerURL == "" || s.runID == "" || os.Getenv("CLAW_TOKEN") == "" {
 		return
 	}
 	url := fmt.Sprintf("%s/v1/runs/%s/available-secrets", s.controllerURL, s.runID)
@@ -128,7 +126,7 @@ func (s *agentSession) loadAvailableSecrets(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	authClawToken(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return
@@ -155,7 +153,7 @@ func (s *agentSession) loadAvailableSecrets(ctx context.Context) {
 // so a cold-start pod (warm pod idled out) still remembers the conversation. A
 // no-op for a brand-new thread. Called once at pod start, before the first turn.
 func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
-	if s.controllerURL == "" || sessionID == "" || s.token == "" {
+	if s.controllerURL == "" || sessionID == "" || os.Getenv("CLAW_TOKEN") == "" {
 		return
 	}
 	url := fmt.Sprintf("%s/v1/sessions/%s/history", s.controllerURL, sessionID)
@@ -163,7 +161,7 @@ func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	authClawToken(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return
@@ -436,9 +434,7 @@ func (s *agentSession) postProgress(ctx context.Context, text string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if s.token != "" {
-		req.Header.Set("Authorization", "Bearer "+s.token)
-	}
+	authClawToken(req)
 	if resp, e := http.DefaultClient.Do(req); e == nil {
 		resp.Body.Close()
 	}
@@ -448,7 +444,7 @@ func (s *agentSession) postProgress(ctx context.Context, text string) {
 // the user an intake link, then polls until the value is provided, writes it to
 // the tmpfs secrets dir, and points $GOOGLE_APPLICATION_CREDENTIALS at it.
 func (s *agentSession) requestSecret(ctx context.Context, name, description, reason, envVar string) string {
-	if s.controllerURL == "" || s.runID == "" || s.token == "" {
+	if s.controllerURL == "" || s.runID == "" || os.Getenv("CLAW_TOKEN") == "" {
 		return "request_secret is unavailable in this run (no controller binding)."
 	}
 	// Retrieve-first: if access is already granted + the value is present, install
@@ -510,7 +506,7 @@ func (s *agentSession) post(ctx context.Context, path string, body []byte) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	authClawToken(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -529,7 +525,7 @@ func (s *agentSession) fetchRequested(ctx context.Context, name string) (string,
 	if err != nil {
 		return "", nil, false
 	}
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	authClawToken(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", nil, false
