@@ -86,7 +86,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	refresh, err := s.Signer.IssueRefresh(req.RunID, refreshTokenTTL)
+	refresh, err := s.Signer.IssueRefresh(req.RunID, principal.PodName, principal.PodUID, refreshTokenTTL)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -106,6 +106,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 // token itself is returned unchanged — it is bounded by refreshTokenTTL and
 // dies with the signer key on controller restart (the runner then falls back to
 // a full /login with its projected SA token).
+//
+// The signature alone is NOT sufficient: the token is bound to the pod that
+// logged in, and the same attestation as /login re-runs here — that exact pod
+// (by name AND uid) must still exist, in the run's namespace, labelled for the
+// run, under the agent's ServiceAccount. A refresh token copied off a pod stops
+// minting access tokens the moment the pod is gone.
 func (s *Server) refreshToken(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.Signer.VerifyRefresh(bearer(r))
 	if err != nil {
@@ -119,6 +125,17 @@ func (s *Server) refreshToken(w http.ResponseWriter, r *http.Request) {
 		return e
 	}); err != nil {
 		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	var pod corev1.Pod
+	if err := s.Reader.Get(r.Context(), client.ObjectKey{Namespace: run.AgentNamespace, Name: claims.PodName}, &pod); err != nil {
+		s.auditRefreshFail(r.Context(), claims.RunID, "pod load: "+err.Error())
+		writeErr(w, http.StatusUnauthorized, "attestation failed")
+		return
+	}
+	if reason := attestPod(&pod, claims.PodUID, run); reason != "" {
+		s.auditRefreshFail(r.Context(), claims.RunID, reason)
+		writeErr(w, http.StatusUnauthorized, "attestation failed")
 		return
 	}
 	allowed, err := s.grantedSecretNames(r.Context(), run)
@@ -182,6 +199,12 @@ func (s *Server) grantedSecretNames(ctx context.Context, run store.Run) ([]strin
 func (s *Server) auditLoginFail(ctx context.Context, runID, reason string) {
 	_ = s.Store.Tx(ctx, func(tx store.Tx) error {
 		return tx.AppendAudit(store.AuditEvent{Type: "workload.login_failed", RunID: runID, Detail: map[string]any{"reason": reason}})
+	})
+}
+
+func (s *Server) auditRefreshFail(ctx context.Context, runID, reason string) {
+	_ = s.Store.Tx(ctx, func(tx store.Tx) error {
+		return tx.AppendAudit(store.AuditEvent{Type: "workload.token_refresh_failed", RunID: runID, Detail: map[string]any{"reason": reason}})
 	})
 }
 

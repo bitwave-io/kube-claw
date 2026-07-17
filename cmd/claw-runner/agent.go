@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -362,12 +361,7 @@ func (s *agentSession) loadAvailableSecrets(ctx context.Context) {
 		return
 	}
 	url := fmt.Sprintf("%s/v1/runs/%s/available-secrets", s.controllerURL, s.currentRunID())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return
-	}
-	authClawToken(req)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedDo(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return
 	}
@@ -397,12 +391,7 @@ func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
 		return
 	}
 	url := fmt.Sprintf("%s/v1/sessions/%s/history", s.controllerURL, sessionID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return
-	}
-	authClawToken(req)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedDo(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return
 	}
@@ -834,13 +823,7 @@ func (s *agentSession) heartbeat(ctx context.Context) {
 func (s *agentSession) postProgress(ctx context.Context, text string) {
 	body, _ := json.Marshal(map[string]string{"text": text})
 	url := fmt.Sprintf("%s/v1/runs/%s/progress", s.controllerURL, s.currentRunID())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	authClawToken(req)
-	if resp, e := http.DefaultClient.Do(req); e == nil {
+	if resp, e := authedDo(ctx, http.MethodPost, url, body); e == nil {
 		resp.Body.Close()
 	}
 }
@@ -923,13 +906,7 @@ func (s *agentSession) publishDocument(ctx context.Context, title, markdown, art
 	url := fmt.Sprintf("%s/v1/runs/%s/artifacts", s.controllerURL, s.currentRunID())
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(rctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return "Couldn't publish the document: " + err.Error()
-	}
-	req.Header.Set("Content-Type", "application/json")
-	authClawToken(req)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedDo(rctx, http.MethodPost, url, body)
 	if err != nil {
 		return "Couldn't publish the document: " + err.Error()
 	}
@@ -954,13 +931,7 @@ func (s *agentSession) publishDocument(ctx context.Context, title, markdown, art
 }
 
 func (s *agentSession) post(ctx context.Context, path string, body []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.controllerURL+path, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	authClawToken(req)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedDo(ctx, http.MethodPost, s.controllerURL+path, body)
 	if err != nil {
 		return err
 	}
@@ -974,12 +945,7 @@ func (s *agentSession) post(ctx context.Context, path string, body []byte) error
 // fetchRequested returns (path, decoded value, true) once the secret is provided.
 func (s *agentSession) fetchRequested(ctx context.Context, name string) (string, []byte, bool) {
 	url := fmt.Sprintf("%s/v1/runs/%s/requested-secret?name=%s", s.controllerURL, s.currentRunID(), name)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", nil, false
-	}
-	authClawToken(req)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedDo(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", nil, false
 	}

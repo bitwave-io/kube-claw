@@ -27,6 +27,37 @@ import (
 // lands (with room to retry) before the old token dies.
 const refreshMargin = 10 * time.Minute
 
+// authedDo sends an authenticated request to the controller and, on a 401,
+// renews the session token and retries ONCE. Expiry is handled proactively by
+// clawToken, but a controller restart invalidates tokens that our clock says
+// are still good — every authenticated call must recover from that, not just
+// claim-next and the final output post. The body is a byte slice (not a
+// Reader) so the retry can resend it. The caller owns resp.Body.
+func authedDo(ctx context.Context, method, url string, body []byte) (*http.Response, error) {
+	controllerURL := os.Getenv("CLAW_CONTROLLER_URL")
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		if len(body) > 0 {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		authClawToken(req)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+			resp.Body.Close()
+			fmt.Fprintf(os.Stderr, "claw-runner: %s %s unauthorized — renewing session token and retrying\n", method, url)
+			forceTokenRenewal(controllerURL)
+			continue
+		}
+		return resp, nil
+	}
+}
+
 type tokenState struct {
 	mu        sync.Mutex
 	token     string

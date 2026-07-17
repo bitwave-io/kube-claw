@@ -20,6 +20,12 @@ type Claims struct {
 	Secrets []string `json:"secrets"`        // secret names this token may materialize
 	Exp     int64    `json:"exp"`            // unix seconds
 	Kind    string   `json:"kind,omitempty"` // "" or KindAccess = access; KindRefresh = refresh-only
+	// PodName/PodUID (refresh tokens only) bind the token to the pod that
+	// logged in: the refresh exchange re-attests that this exact pod still
+	// exists, so a copied refresh token dies with the pod instead of minting
+	// access tokens for its full TTL.
+	PodName string `json:"pod,omitempty"`
+	PodUID  string `json:"uid,omitempty"`
 }
 
 // Token kinds. An access token authenticates runner callbacks; a refresh token
@@ -50,10 +56,11 @@ func (s *Signer) Issue(runID string, secrets []string, ttl time.Duration) (strin
 	return s.issue(Claims{RunID: runID, Secrets: secrets, Exp: time.Now().Add(ttl).Unix(), Kind: KindAccess})
 }
 
-// IssueRefresh returns a signed refresh token. It carries no secret scopes —
-// scopes are re-derived from current grants at refresh time.
-func (s *Signer) IssueRefresh(runID string, ttl time.Duration) (string, error) {
-	return s.issue(Claims{RunID: runID, Exp: time.Now().Add(ttl).Unix(), Kind: KindRefresh})
+// IssueRefresh returns a signed refresh token bound to the logging-in pod. It
+// carries no secret scopes — scopes are re-derived from current grants at
+// refresh time, and the pod binding is re-attested there too.
+func (s *Signer) IssueRefresh(runID, podName, podUID string, ttl time.Duration) (string, error) {
+	return s.issue(Claims{RunID: runID, Exp: time.Now().Add(ttl).Unix(), Kind: KindRefresh, PodName: podName, PodUID: podUID})
 }
 
 func (s *Signer) issue(c Claims) (string, error) {

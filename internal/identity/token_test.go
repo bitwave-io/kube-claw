@@ -46,7 +46,7 @@ func TestRefreshTokenKinds(t *testing.T) {
 	}
 
 	access, _ := s.Issue("run-1", []string{"gcp-billing"}, time.Minute)
-	refresh, err := s.IssueRefresh("run-1", time.Hour)
+	refresh, err := s.IssueRefresh("run-1", "pod-a", "uid-1", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +67,12 @@ func TestRefreshTokenKinds(t *testing.T) {
 	if c.RunID != "run-1" || c.Kind != KindRefresh || len(c.Secrets) != 0 {
 		t.Fatalf("refresh claims wrong: %+v", c)
 	}
+	if c.PodName != "pod-a" || c.PodUID != "uid-1" {
+		t.Fatalf("refresh token must carry its pod binding: %+v", c)
+	}
 
 	// Expired refresh token → error.
-	exp, _ := s.IssueRefresh("run-1", -time.Second)
+	exp, _ := s.IssueRefresh("run-1", "pod-a", "uid-1", -time.Second)
 	if _, err := s.VerifyRefresh(exp); err == nil {
 		t.Fatal("expired refresh token verified")
 	}

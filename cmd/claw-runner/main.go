@@ -7,7 +7,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -198,12 +197,7 @@ func signalSleep(controllerURL, sessionID string) {
 	url := fmt.Sprintf("%s/v1/sessions/%s/sleep", controllerURL, sessionID)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	if err != nil {
-		return
-	}
-	authClawToken(req)
-	if resp, err := http.DefaultClient.Do(req); err == nil {
+	if resp, err := authedDo(ctx, http.MethodPost, url, nil); err == nil {
 		resp.Body.Close()
 	}
 }
@@ -213,12 +207,7 @@ func claimNextTurn(controllerURL, sessionID, pod string) (runID, input string, o
 	url := fmt.Sprintf("%s/v1/sessions/%s/claim-next?pod=%s", controllerURL, sessionID, pod)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	if err != nil {
-		return "", "", false
-	}
-	authClawToken(req)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedDo(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return "", "", false
 	}
@@ -227,13 +216,10 @@ func claimNextTurn(controllerURL, sessionID, pod string) (runID, input string, o
 	case http.StatusOK:
 	case http.StatusNoContent:
 		return "", "", false // nothing pending
-	case http.StatusUnauthorized:
-		// A deaf warm pod silently blocks the whole session (the engine defers
-		// pending turns to it) — renew now and say so, never swallow the 401.
-		fmt.Fprintln(os.Stderr, "claw-runner: claim-next unauthorized — renewing session token")
-		forceTokenRenewal(controllerURL)
-		return "", "", false
 	default:
+		// authedDo already renewed + retried on 401; a status landing here is
+		// abnormal — say so, never silently swallow it (a deaf warm pod blocks
+		// the whole session while the engine defers pending turns to it).
 		fmt.Fprintf(os.Stderr, "claw-runner: claim-next returned %s\n", resp.Status)
 		return "", "", false
 	}
@@ -391,34 +377,20 @@ func postOutput(controllerURL, runID, content string) error {
 	body, _ := json.Marshal(map[string]string{"kind": kind, "content": content})
 	url := fmt.Sprintf("%s/v1/runs/%s/outputs", controllerURL, runID)
 
-	// One retry after a forced token renewal: an answer produced just as the
-	// access token expires must not be lost to a single 401 (the controller
-	// dedupes replays, so retrying is safe).
-	for attempt := 0; ; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
-			cancel()
-			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		authClawToken(req)
-		resp, err := http.DefaultClient.Do(req)
-		cancel()
-		if err != nil {
-			return err
-		}
-		resp.Body.Close()
-		switch {
-		case resp.StatusCode < 300:
-			return nil
-		case resp.StatusCode == http.StatusUnauthorized && attempt == 0:
-			fmt.Fprintln(os.Stderr, "claw-runner: output post unauthorized — renewing session token and retrying")
-			forceTokenRenewal(controllerURL)
-		default:
-			return fmt.Errorf("controller returned %s", resp.Status)
-		}
+	// authedDo renews the token and retries once on 401: an answer produced
+	// just as the access token expires must not be lost (the controller dedupes
+	// replays, so retrying is safe).
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := authedDo(ctx, http.MethodPost, url, body)
+	if err != nil {
+		return err
 	}
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("controller returned %s", resp.Status)
+	}
+	return nil
 }
 
 // authClawToken adds the run session token so the controller can authenticate
