@@ -19,8 +19,12 @@ type Event struct {
 	RunID string `json:"runId"`
 	// SessionID is the connector's ORIGINAL session id (un-namespaced).
 	SessionID string `json:"sessionId,omitempty"`
-	Kind      string `json:"kind"` // "output" (final answer) | "progress"
-	Content   string `json:"content"`
+	// Kind: "output" (final answer) | "progress" (mid-run update) | "none"
+	// (terminal, no reply — the message was absorbed into a newer turn's answer
+	// or the agent judged no reply was needed). "output" and "none" are both
+	// terminal for their runId.
+	Kind    string `json:"kind"`
+	Content string `json:"content"`
 }
 
 // Sign computes the callback signature: hex(HMAC-SHA256(secret, ts + "." + body)).

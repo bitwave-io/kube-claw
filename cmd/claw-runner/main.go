@@ -53,13 +53,19 @@ func main() {
 	actx, acancel := context.WithTimeout(context.Background(), 15*time.Second)
 	sess.loadAvailableSecrets(actx)
 	acancel()
+	// For a Slack session, let a running turn claim messages that arrive mid-turn
+	// (interrupts): the model sees them immediately instead of after it finishes.
+	sessionID := os.Getenv("CLAW_SESSION_ID")
+	if sessionID != "" {
+		pod := os.Getenv("HOSTNAME")
+		sess.claimTurn = func() (string, string, bool) { return claimNextTurn(controllerURL, sessionID, pod) }
+	}
 	answer := turn(sess, runID, input)
-	if err := postOutput(controllerURL, runID, answer); err != nil {
+	if err := deliver(sess, controllerURL, runID, answer); err != nil {
 		fmt.Fprintf(os.Stderr, "claw-runner: posting output: %v\n", err)
 		os.Exit(1)
 	}
 
-	sessionID := os.Getenv("CLAW_SESSION_ID")
 	if sessionID == "" {
 		fmt.Println("claw-runner: no session — exiting 0")
 		return
@@ -67,16 +73,40 @@ func main() {
 	warmLoop(sess, controllerURL, sessionID)
 }
 
+// deliver posts a finished turn's answer. If the turn absorbed messages that
+// arrived mid-run, the answer posts on the NEWEST of those runs (whose 👀 is
+// the one still pending in Slack) and the older runs complete silently — one
+// current reply instead of a stale one per message.
+func deliver(sess *agentSession, controllerURL, runID, answer string) error {
+	ids := append([]string{runID}, sess.takeExtraRuns()...)
+	for _, id := range ids[:len(ids)-1] {
+		if err := postOutput(controllerURL, id, noReply); err != nil {
+			fmt.Fprintf(os.Stderr, "claw-runner: closing absorbed run %s: %v\n", id, err)
+		}
+	}
+	return postOutput(controllerURL, ids[len(ids)-1], answer)
+}
+
 // turn runs one message to an answer string (errors become a clear, visible
 // reply). The runner retries transient failures internally (with in-thread
 // "retrying…" messages); this is the final, humanized message once it gives up.
 func turn(sess *agentSession, runID, input string) string {
+	// Attribute this turn's callbacks (progress, secret requests, published
+	// artifacts) to the run being served, not the pod's first run.
+	sess.setRunID(runID)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	ans, err := sess.turn(ctx, input)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "claw-runner: agent turn failed: %v\n", err)
 		return humanizeErr(err)
+	}
+	// A stop that carried a new instruction ("stop, check prod-a instead")
+	// cancels the old work first (done inside sess.turn), then the instruction
+	// runs as a fresh turn — its answer supersedes the bare stop ack.
+	if follow := sess.takeStopFollowup(); follow != "" {
+		return turn(sess, runID,
+			"[You were stopped mid-task and that work is cancelled — do not resume it. The stopping message also contained a new instruction; briefly confirm the stop, then handle it:]\n"+follow)
 	}
 	fmt.Printf("claw-runner: run=%s input=%q -> %q\n", runID, input, ans)
 	return ans
@@ -109,8 +139,38 @@ func warmLoop(sess *agentSession, controllerURL, sessionID string) {
 	for {
 		runID, input, ok := claimNextTurn(controllerURL, sessionID, pod)
 		if ok {
+			// Drain the backlog before answering: messages that piled up while the
+			// last turn ran are answered ONCE, newest instruction included — the
+			// later message is often a correction of the earlier one.
+			ids, texts := []string{runID}, []string{input}
+			for {
+				id, text, more := claimNextTurn(controllerURL, sessionID, pod)
+				if !more {
+					break
+				}
+				ids = append(ids, id)
+				texts = append(texts, text)
+			}
+			for _, id := range ids[:len(ids)-1] {
+				if err := postOutput(controllerURL, id, noReply); err != nil {
+					fmt.Fprintf(os.Stderr, "claw-runner: closing coalesced run %s: %v\n", id, err)
+				}
+			}
+			runID = ids[len(ids)-1]
+			if len(texts) > 1 {
+				input = "Several messages arrived while you were away — read them all before answering; the newest may change or cancel the earlier asks:\n\n" +
+					strings.Join(texts, "\n\n")
+			} else if stop, rest := stopCommand(input); stop && rest == "" {
+				// A bare "stop" with nothing running needs no model call — the user
+				// likely thinks work is still in flight. Confirm and move on.
+				if err := postOutput(controllerURL, runID, "🛑 Nothing is running — I've stopped."); err != nil {
+					fmt.Fprintf(os.Stderr, "claw-runner: posting stop ack: %v\n", err)
+				}
+				lastActivity = time.Now()
+				continue
+			}
 			ans := turn(sess, runID, input)
-			if err := postOutput(controllerURL, runID, ans); err != nil {
+			if err := deliver(sess, controllerURL, runID, ans); err != nil {
 				fmt.Fprintf(os.Stderr, "claw-runner: posting follow-up output: %v\n", err)
 			}
 			lastActivity = time.Now() // bump the idle timer
@@ -311,7 +371,13 @@ func manifestDescriptions() []string {
 }
 
 func postOutput(controllerURL, runID, content string) error {
-	body, _ := json.Marshal(map[string]string{"kind": "text", "content": content})
+	// A noReply answer still completes the run (and clears its 👀 marker in
+	// Slack) but the controller posts nothing to the thread.
+	kind := "text"
+	if strings.TrimSpace(content) == noReply {
+		kind, content = "none", ""
+	}
+	body, _ := json.Marshal(map[string]string{"kind": kind, "content": content})
 	url := fmt.Sprintf("%s/v1/runs/%s/outputs", controllerURL, runID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

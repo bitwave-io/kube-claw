@@ -41,6 +41,10 @@ spec:
             - --runner-image={{ .Values.controller.runnerImage }}
             - --self-url={{ .Values.controller.selfURL }}
             - --log-format={{ .Values.controller.logFormat }}
+            {{- with .Values.controller.artifacts }}
+            - --artifact-ttl={{ .ttl }}
+            - --artifact-max-ttl={{ .maxTTL }}
+            {{- end }}
           env:
             # Opt-in: restrict agent egress (deny east/west). Off by default —
             # requires a CNI that enforces egress correctly for host-networked

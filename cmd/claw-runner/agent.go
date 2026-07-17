@@ -10,12 +10,19 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// noReply is the sentinel answer the agent returns when the latest message
+// needs no response from it (e.g. two humans talking to each other). It flows
+// through postOutput as a kind:"none" output — the run completes, the 👀
+// marker clears, and nothing is posted to the thread.
+const noReply = "NO_REPLY"
 
 // agentSession is one warm Slack thread: a Claude tool-use loop (claude-opus-4-8,
 // adaptive thinking, bash + request_secret tools) whose message history persists
@@ -29,19 +36,224 @@ type agentSession struct {
 	controllerURL string
 	token         string // CLAW_TOKEN, for on-demand secret requests
 	runID         string
+	agentName     string // CLAW_AGENT_NAME — the agent picked to service this thread
 
 	// servedModel is the model ID the API reported serving the last call; the
-	// first reply this pod posts is tagged with it (a fresh tag mid-thread means
-	// the warm pod restarted — useful when diagnosing stalls/evictions).
+	// first reply this pod posts is tagged with it and the agent name (a fresh
+	// tag mid-thread means the warm pod restarted — useful when diagnosing
+	// stalls/evictions).
 	servedModel string
 	modelTagged bool
 
-	mu   sync.Mutex // guards step
+	// claimTurn (set for warm Slack sessions) claims the next queued follow-up
+	// run. While a turn runs, watchInterrupts is the only claimer: it lets the
+	// turn absorb messages that arrive WHILE it runs instead of answering them
+	// one-by-one afterwards with stale context, and it hard-cancels the turn on
+	// a stop command.
+	claimTurn func() (runID, text string, ok bool)
+
+	mu   sync.Mutex // guards step + recent + the interrupt state below
 	step string     // the agent's current narrated step, surfaced by the heartbeat
+	// extraRuns holds run ids claimed mid-turn (the caller completes them — the
+	// answer posts on the newest, older ones close silently); interrupts holds
+	// their texts until the next model call injects them. aborted/stopText are
+	// set by watchInterrupts when a user stop command cancels the turn.
+	extraRuns  []string
+	interrupts []string
+	aborted    bool
+	stopText   string // full text of the stop message (may carry a new instruction)
+	// recent is a rolling log of the steps taken this turn (narration lines +
+	// commands run), so the heartbeat can summarize what the agent has been
+	// doing rather than only echoing the latest line. Reset at the start of a turn.
+	recent []string
 }
 
-func (s *agentSession) setStep(t string) { s.mu.Lock(); s.step = t; s.mu.Unlock() }
-func (s *agentSession) getStep() string  { s.mu.Lock(); defer s.mu.Unlock(); return s.step }
+// setRunID switches the session's callback attribution to the given run. Each
+// warm-loop turn serves a DIFFERENT run: progress updates, secret requests, and
+// published artifacts must be stored and audited against the run that asked,
+// not the pod's first run.
+func (s *agentSession) setRunID(id string) { s.mu.Lock(); s.runID = id; s.mu.Unlock() }
+
+func (s *agentSession) currentRunID() string { s.mu.Lock(); defer s.mu.Unlock(); return s.runID }
+
+// setStep records the agent's current step and appends it to the turn's rolling
+// activity log, so the heartbeat can show both what's happening now and a summary
+// of what's already been done.
+func (s *agentSession) setStep(t string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.step = t
+	if t == "" {
+		return
+	}
+	// Skip consecutive duplicates (e.g. re-narrating the same step).
+	if n := len(s.recent); n > 0 && s.recent[n-1] == t {
+		return
+	}
+	s.recent = append(s.recent, t)
+	const maxRecent = 8 // keep the tail; the heartbeat shows the last few
+	if len(s.recent) > maxRecent {
+		s.recent = s.recent[len(s.recent)-maxRecent:]
+	}
+}
+
+func (s *agentSession) getStep() string { s.mu.Lock(); defer s.mu.Unlock(); return s.step }
+
+// resetActivity clears the rolling activity log at the start of a turn.
+func (s *agentSession) resetActivity() { s.mu.Lock(); s.recent = nil; s.step = ""; s.mu.Unlock() }
+
+// activitySummary returns the current step plus a short list of the recent steps
+// taken this turn, for the heartbeat to report. done excludes the in-progress step.
+func (s *agentSession) activitySummary() (current string, done []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current = s.step
+	// The last entry in recent is usually the current step — omit it from "done".
+	done = s.recent
+	if n := len(done); n > 0 && done[n-1] == current {
+		done = done[:n-1]
+	}
+	// Return a copy so callers can format without holding the lock.
+	if len(done) > 4 {
+		done = done[len(done)-4:] // show at most the last 4 completed steps
+	}
+	out := make([]string, len(done))
+	copy(out, done)
+	return current, out
+}
+
+// beginTurn resets the per-turn interrupt state.
+func (s *agentSession) beginTurn() {
+	s.mu.Lock()
+	s.aborted, s.stopText, s.interrupts = false, "", nil
+	s.mu.Unlock()
+}
+
+// takeInterrupts returns (and clears) the buffered mid-turn message texts.
+func (s *agentSession) takeInterrupts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	texts := s.interrupts
+	s.interrupts = nil
+	return texts
+}
+
+// hasInterrupts reports whether a mid-turn message is waiting to be injected.
+func (s *agentSession) hasInterrupts() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.interrupts) > 0
+}
+
+// takeExtraRuns returns (and clears) the runs claimed during the last turn.
+func (s *agentSession) takeExtraRuns() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := s.extraRuns
+	s.extraRuns = nil
+	return ids
+}
+
+// isAborted reports whether the current turn was cancelled by a user stop.
+func (s *agentSession) isAborted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.aborted
+}
+
+// takeStopFollowup returns the stop message's text when it carried more than
+// the bare stop word ("stop, check prod-a instead") — the caller runs it as a
+// fresh turn once the old work is cancelled. Empty for a plain "stop".
+func (s *agentSession) takeStopFollowup() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.stopText
+	s.stopText = ""
+	if t == "" {
+		return ""
+	}
+	if _, rest := stopCommand(t); rest == "" {
+		return ""
+	}
+	return t
+}
+
+// watchInterrupts claims queued follow-up runs every few seconds WHILE a turn
+// runs (it is the turn's only claimer). Ordinary messages are buffered for
+// injection at the next loop iteration; a stop command cancels the turn's
+// context immediately — killing the in-flight model call, bash command, or
+// approval wait — instead of waiting politely for the model to finish. Runs
+// claimed here are completed by the caller when the turn ends.
+func (s *agentSession) watchInterrupts(ctx context.Context, cancelTurn context.CancelFunc) {
+	if s.claimTurn == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+		for {
+			if ctx.Err() != nil {
+				return // turn ended — stop claiming so nothing is orphaned
+			}
+			id, text, ok := s.claimTurn()
+			if !ok {
+				break
+			}
+			stop, _ := stopCommand(text)
+			s.mu.Lock()
+			s.extraRuns = append(s.extraRuns, id)
+			if stop {
+				s.aborted, s.stopText = true, text
+				s.mu.Unlock()
+				cancelTurn()
+				return
+			}
+			s.interrupts = append(s.interrupts, text)
+			s.mu.Unlock()
+		}
+	}
+}
+
+// slackMention matches encoded Slack mentions (and the "<@U…>:" sender prefix)
+// so stop detection sees the words, not the markup.
+var slackMention = regexp.MustCompile(`<@[^>]+>:?`)
+
+// stopCommand reports whether a message is a stop/cancel order for the agent,
+// and returns any instruction that follows the stop word ("stop, check prod-a
+// instead" → rest != ""; a bare "stop"/"please stop"/"cancel that" → ""). It is
+// deliberately conservative: only messages that LEAD with a stop word count —
+// "can you stop the dev cluster?" is a task, not an abort.
+func stopCommand(text string) (isStop bool, rest string) {
+	t := strings.ToLower(slackMention.ReplaceAllString(text, " "))
+	fields := strings.FieldsFunc(t, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == ',' || r == '.' || r == '!' || r == ';' || r == ':'
+	})
+	i := 0
+	for i < len(fields) && (fields[i] == "please" || fields[i] == "ok" || fields[i] == "okay" || fields[i] == "hey" || fields[i] == "no") {
+		i++
+	}
+	if i >= len(fields) {
+		return false, ""
+	}
+	switch fields[i] {
+	case "stop", "cancel", "abort", "halt":
+	default:
+		return false, ""
+	}
+	after := fields[i+1:]
+	for len(after) > 0 {
+		switch after[0] {
+		case "please", "that", "it", "now", "everything", "all", "working", "this":
+			after = after[1:]
+		default:
+			return true, strings.Join(after, " ")
+		}
+	}
+	return true, ""
+}
 
 func newAgentSession(systemPrompt string) *agentSession {
 	sys := strings.TrimSpace(systemPrompt)
@@ -66,9 +278,17 @@ func newAgentSession(systemPrompt string) *agentSession {
 		"Bash commands are killed after 90 seconds and long output is truncated — use non-interactive flags, and narrow output with grep/head/--format instead of dumping everything.",
 		"Before each slow or significant command, say in one short sentence what you're about to do. That narration is shown to the user as live progress while they wait.",
 		"You are chatting in Slack. Format replies as Slack mrkdwn: *single asterisks* for bold, _underscores_ for italic, `backticks` for code, ``` fenced blocks ``` for command output, and simple - bullets. NEVER use Markdown headers (#), **double asterisks**, or tables — they render as literal characters in Slack. Messages may arrive prefixed with the sender's Slack id (`<@U…>:`), and you can mention a user the same way.",
-		"If a task needs a credential you don't have (a cloud key, an API token), DON'T give up — call the `request_secret` tool. It DMs the user a secure link to provide it, then writes it to a file in this container so you can use it.",
+		"You are ONE PARTICIPANT in a team conversation, not its owner. The humans in the thread also talk to EACH OTHER: if the latest message is addressed to another person, is two people coordinating between themselves, or otherwise needs nothing from you, reply with exactly "+noReply+" (nothing else) and no message will be posted.",
+		"SCOPE: do exactly what you were asked, then stop. An idea someone floats in passing (\"this could also help us consolidate X\") is context, NOT a task — do not start on it, do not draft a plan for it, and do not request credentials for it. If you think you could help with something nobody assigned you, offer it in ONE short sentence at most, and drop it unless someone explicitly says yes.",
+		"Never begin multi-step work (inventories, audits, designs, migrations) on your own initiative. Say what you would do in a sentence or two and wait for an explicit go-ahead before doing any of it.",
+		"Answer the specific question that was asked, concisely. Do not append capability menus, offers of other things you could look into, or plans for work beyond the question.",
+		"If a message arrives mid-task (marked as a new Slack message in the tool results), deal with it FIRST — it may correct, narrow, or cancel what you're doing. A newer instruction always outranks your current plan.",
+		"When a user says stop, your in-flight work is cancelled for you. Afterwards, acknowledge in ONE short line and wait for direction — do NOT resume or re-plan the cancelled work unless someone asks again.",
+		"If a task you were asked to do needs a credential you don't have (a cloud key, an API token), DON'T give up — call the `request_secret` tool. It DMs the user a secure link to provide it, then writes it to a file in this container so you can use it.",
+		"CREDENTIAL REQUESTS INTERRUPT HUMANS: request_secret DMs a user or pings the secret's approvers. Only call it when the credential is required for a task someone explicitly asked YOU to do — never speculatively, never \"in parallel\" for a side idea, and never just because a credential is listed as available.",
 		"IMPORTANT: if you already requested a secret and the user now says they've added it / asks you to check, call `request_secret` AGAIN with the same name — that installs the value. Do NOT use bash to look for it; the value is only pulled into the container by request_secret.",
-		"Prefer read-only commands. Answer the user's question concisely, then stop. This is a chat thread — you may be asked follow-up questions.")
+		"When the user wants a document they can take OUT of Slack — a design doc to hand to a coding agent, a runbook, a spec — write it as full Markdown (headers/tables are fine there; the Slack-formatting rule applies only to chat replies) and call `publish_document`. It returns a time-bound share link. In your reply, always give the link, state plainly when it expires (the tool tells you), and mention that saying \"reshare\" here gets a fresh link. If the user asks to reshare/regenerate a link, call `publish_document` again with that document's `artifact_id` — do NOT resend the content.",
+		"Prefer read-only commands. This is a chat thread — you may be asked follow-up questions.")
 	sys = sys + "\n\n" + strings.Join(notes, "\n")
 
 	model := anthropic.ModelClaudeOpus4_8
@@ -92,7 +312,9 @@ func newAgentSession(systemPrompt string) *agentSession {
 			"granted access, this opens an access request that the secret's approvers must approve in Slack (your `reason` " +
 			"is shown to them). If it doesn't exist, the user is DMed a one-time link to provide it. Once approved/provided, " +
 			"call this AGAIN with the same name to install it — the value is written to a file, the env var is set, and the " +
-			"path is returned. This tool is the ONLY way to get the value into the container; do NOT bash-check for it."),
+			"path is returned. This tool is the ONLY way to get the value into the container; do NOT bash-check for it. " +
+			"Every request interrupts a human (a DM or an approver ping): only call it when the credential is required for " +
+			"a task a user explicitly asked you to do, never speculatively."),
 		InputSchema: anthropic.ToolInputSchemaParam{
 			Properties: map[string]any{
 				"name":        map[string]any{"type": "string", "description": "secret name (use the EXACT name if it's listed as available to you), e.g. gcp-billing-readonly"},
@@ -105,14 +327,32 @@ func newAgentSession(systemPrompt string) *agentSession {
 			Required: []string{"name", "description", "reason"},
 		},
 	}
+	publishDocTool := anthropic.ToolParam{
+		Name: "publish_document",
+		Description: anthropic.String("Publish a Markdown document (a design doc, spec, runbook) and get back a TIME-BOUND " +
+			"share link the user can hand to tools outside Slack (the URL serves the raw markdown). The result tells you the " +
+			"exact expiry — always repeat the link AND its expiry in your reply, and note that the user can say \"reshare\" " +
+			"in this thread for a fresh link. To reshare an expired/old link, call this again with the returned artifact_id " +
+			"and NO markdown — the stored document is relinked as-is (documents are immutable; to change content, publish a " +
+			"new document instead)."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"title":       map[string]any{"type": "string", "description": "short document title, e.g. \"Billing-alerts design\""},
+				"markdown":    map[string]any{"type": "string", "description": "the full document as Markdown (omit when resharing via artifact_id)"},
+				"artifact_id": map[string]any{"type": "string", "description": "OPTIONAL: id of a previously published document to mint a fresh link for (revokes its old links)"},
+			},
+			Required: []string{"title"},
+		},
+	}
 	return &agentSession{
 		client:        anthropic.NewClient(), // reads ANTHROPIC_API_KEY
 		model:         model,
 		sys:           sys,
-		tools:         []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}},
+		tools:         []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool}},
 		controllerURL: os.Getenv("CLAW_CONTROLLER_URL"),
 		token:         os.Getenv("CLAW_TOKEN"),
 		runID:         os.Getenv("CLAW_RUN_ID"),
+		agentName:     os.Getenv("CLAW_AGENT_NAME"),
 	}
 }
 
@@ -120,10 +360,10 @@ func newAgentSession(systemPrompt string) *agentSession {
 // + descriptions, never values) to the system prompt, so it uses an existing key
 // by name instead of asking the user for a new one.
 func (s *agentSession) loadAvailableSecrets(ctx context.Context) {
-	if s.controllerURL == "" || s.runID == "" || s.token == "" {
+	if s.controllerURL == "" || s.currentRunID() == "" || s.token == "" {
 		return
 	}
-	url := fmt.Sprintf("%s/v1/runs/%s/available-secrets", s.controllerURL, s.runID)
+	url := fmt.Sprintf("%s/v1/runs/%s/available-secrets", s.controllerURL, s.currentRunID())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return
@@ -178,10 +418,31 @@ func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
 	if json.NewDecoder(resp.Body).Decode(&out) != nil {
 		return
 	}
+	// Turns with an empty output are messages that never got their own reply
+	// (coalesced into a later answer, or judged to need none). The API requires
+	// user/assistant alternation, so fold each unanswered input into the NEXT
+	// answered turn's user message — mirroring how the live turn saw them.
+	var pending []string
 	for _, t := range out.Turns {
+		if t.Output == "" {
+			pending = append(pending, t.Input)
+			continue
+		}
+		in := t.Input
+		if len(pending) > 0 {
+			in = strings.Join(append(pending, in), "\n\n")
+			pending = nil
+		}
 		s.messages = append(s.messages,
-			anthropic.NewUserMessage(anthropic.NewTextBlock(t.Input)),
+			anthropic.NewUserMessage(anthropic.NewTextBlock(in)),
 			anthropic.NewAssistantMessage(anthropic.NewTextBlock(t.Output)))
+	}
+	// Trailing unanswered messages have no answered turn to ride with; a
+	// synthetic ack keeps the alternation valid without inventing an answer.
+	if len(pending) > 0 {
+		s.messages = append(s.messages,
+			anthropic.NewUserMessage(anthropic.NewTextBlock(strings.Join(pending, "\n\n"))),
+			anthropic.NewAssistantMessage(anthropic.NewTextBlock("(These messages were acknowledged without a direct reply.)")))
 	}
 	if len(out.Turns) > 0 {
 		fmt.Printf("claw-runner: replayed %d prior turn(s) for session %s\n", len(out.Turns), sessionID)
@@ -195,17 +456,40 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 	s.messages = append(s.messages, anthropic.NewUserMessage(anthropic.NewTextBlock(userText)))
 	adaptive := anthropic.ThinkingConfigAdaptiveParam{}
 
-	// Heartbeat: for turns that run long, post in-thread progress (~every 60s)
-	// describing the agent's current step, so a slow operation isn't silent.
-	s.setStep("")
-	hbCtx, stopHB := context.WithCancel(ctx)
-	defer stopHB()
-	go s.heartbeat(hbCtx)
+	// Everything in this turn — model calls, bash, approval waits, heartbeat —
+	// runs under tctx so a user "stop" cancels it all at once. The watcher is
+	// the turn's only claimer of queued messages. It runs under its OWN child
+	// context so the settle path can quiesce it — stop it and WAIT for any
+	// in-flight claim to finish — without cancelling the turn: a cancelled
+	// claim HTTP request could commit server-side and orphan the run, and a
+	// claim that lands after the final interrupt drain must re-enter the loop,
+	// not ride out silently with a stale answer.
+	s.beginTurn()
+	tctx, cancelTurn := context.WithCancel(ctx)
+	defer cancelTurn()
+	var cancelWatcher context.CancelFunc
+	var watcherDone chan struct{}
+	startWatcher := func() {
+		var wctx context.Context
+		wctx, cancelWatcher = context.WithCancel(tctx)
+		done := make(chan struct{})
+		watcherDone = done
+		go func() { defer close(done); s.watchInterrupts(wctx, cancelTurn) }()
+	}
+	quiesce := func() { cancelWatcher(); <-watcherDone }
+	startWatcher()
+	defer func() { quiesce() }()
+
+	// Heartbeat: for turns that run long, post in-thread progress on a backoff
+	// schedule summarizing what the agent has been doing, so a slow operation
+	// isn't silent — and isn't a black box.
+	s.resetActivity()
+	go s.heartbeat(tctx)
 
 	var final []string
 	for { // the turn's ctx deadline (see main.go) bounds the agentic loop
 		markCacheBreakpoint(s.messages)
-		resp, err := s.callModel(ctx, anthropic.MessageNewParams{
+		resp, err := s.callModel(tctx, anthropic.MessageNewParams{
 			Model:     s.model,
 			MaxTokens: 32000,
 			System: []anthropic.TextBlockParam{
@@ -217,6 +501,11 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 			Messages: s.messages,
 		})
 		if err != nil {
+			// A user stop cancelled tctx mid-call: close the turn cleanly with a
+			// short acknowledgement instead of surfacing a cancellation error.
+			if s.isAborted() {
+				return s.finishAbort(), nil
+			}
 			return "", err
 		}
 		s.servedModel = string(resp.Model)
@@ -243,7 +532,16 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 					}
 					_ = json.Unmarshal(raw, &in)
 					s.setStep("Requesting credential " + in.Name + "…")
-					result = s.requestSecret(ctx, in.Name, in.Description, in.Reason, in.EnvVar)
+					result = s.requestSecret(tctx, in.Name, in.Description, in.Reason, in.EnvVar)
+				case "publish_document":
+					var in struct {
+						Title      string `json:"title"`
+						Markdown   string `json:"markdown"`
+						ArtifactID string `json:"artifact_id"`
+					}
+					_ = json.Unmarshal(raw, &in)
+					s.setStep("Publishing document \"" + in.Title + "\"…")
+					result = s.publishDocument(tctx, in.Title, in.Markdown, in.ArtifactID)
 				default: // bash
 					var in struct {
 						Command string `json:"command"`
@@ -252,7 +550,7 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 					// The running command is what the heartbeat reports — it's always
 					// current, unlike narration text (which may be a conclusion).
 					s.setStep("Running `" + firstLine([]byte(in.Command)) + "`…")
-					result = runBash(ctx, in.Command)
+					result = runBash(tctx, in.Command)
 				}
 				toolResults = append(toolResults, anthropic.NewToolResultBlock(block.ID, result, false))
 			}
@@ -265,6 +563,12 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 			}
 		}
 		if resp.StopReason == anthropic.StopReasonToolUse {
+			// Messages that arrived while tools ran ride along with the results, so
+			// a correction ("actually, skip that") lands before more work happens.
+			for _, t := range s.takeInterrupts() {
+				toolResults = append(toolResults, anthropic.NewTextBlock(
+					"[A new Slack message arrived while you were working — handle it before continuing; it may change or cancel the current task]\n"+t))
+			}
 			s.messages = append(s.messages, anthropic.NewUserMessage(toolResults...))
 			continue
 		}
@@ -280,19 +584,79 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 			}
 			continue
 		}
+		// The model finished — but if messages arrived in the meantime, this
+		// answer may already be stale ("don't worry about that"). Hold it back,
+		// show the model what just came in, and let it reply once, current.
+		// (The draft stays in history, so nothing it found is lost.)
+		injectStale := func(texts []string) {
+			blocks := make([]anthropic.ContentBlockParamUnion, 0, len(texts))
+			for _, t := range texts {
+				blocks = append(blocks, anthropic.NewTextBlock(
+					"[A new Slack message arrived before your reply above was posted — it was NOT posted. Write a fresh reply that answers this first and keeps only the still-relevant parts.]\n"+t))
+			}
+			s.messages = append(s.messages, anthropic.NewUserMessage(blocks...))
+		}
+		if texts := s.takeInterrupts(); len(texts) > 0 {
+			injectStale(texts)
+			continue
+		}
+		// Nothing pending — but the watcher may be MID-CLAIM right now, and a
+		// message it lands after the drain above must not settle unseen.
+		// Quiesce it, then re-check; only a drained-and-quiet turn may finish.
+		quiesce()
+		if s.isAborted() {
+			return s.finishAbort(), nil
+		}
+		if texts := s.takeInterrupts(); len(texts) > 0 {
+			injectStale(texts)
+			startWatcher()
+			continue
+		}
 		break
 	}
 	answer := strings.Join(final, "\n\n")
 	if answer == "" {
 		return "", fmt.Errorf("agent produced no text answer")
 	}
-	// Tag the pod's first reply with the model actually served (per the API
-	// response, not the requested constant). Re-appearing mid-thread = pod restart.
+	// The agent judged the message wasn't for it — suppress the reply entirely
+	// (the sentinel is the whole answer; ignore any narration before it).
+	if strings.TrimSpace(final[len(final)-1]) == noReply {
+		return noReply, nil
+	}
+	// Tag the pod's first reply with the agent picked to service this thread and
+	// the model actually served (per the API response, not the requested
+	// constant). Re-appearing mid-thread = pod restart.
 	if !s.modelTagged && s.servedModel != "" {
-		answer += fmt.Sprintf("\n\n_model: %s_", s.servedModel)
+		if s.agentName != "" {
+			answer += fmt.Sprintf("\n\n_agent: %s · model: %s_", s.agentName, s.servedModel)
+		} else {
+			answer += fmt.Sprintf("\n\n_model: %s_", s.servedModel)
+		}
 		s.modelTagged = true
 	}
 	return answer, nil
+}
+
+// finishAbort closes out a turn cancelled by a user stop. The history may end
+// with tool calls whose results never arrived — the API rejects a conversation
+// with dangling tool_use blocks, so each one gets a synthetic "(cancelled)"
+// result — and a short acknowledgement becomes both the turn's answer and the
+// assistant's last message, keeping history and Slack consistent.
+func (s *agentSession) finishAbort() string {
+	if n := len(s.messages); n > 0 && s.messages[n-1].Role == anthropic.MessageParamRoleAssistant {
+		var results []anthropic.ContentBlockParamUnion
+		for _, block := range s.messages[n-1].Content {
+			if tu := block.OfToolUse; tu != nil {
+				results = append(results, anthropic.NewToolResultBlock(tu.ID, "(cancelled — the user said stop)", false))
+			}
+		}
+		if len(results) > 0 {
+			s.messages = append(s.messages, anthropic.NewUserMessage(results...))
+		}
+	}
+	const ack = "🛑 Stopped — I've cancelled what I was doing."
+	s.messages = append(s.messages, anthropic.NewAssistantMessage(anthropic.NewTextBlock(ack)))
+	return ack
 }
 
 // markCacheBreakpoint keeps exactly one ephemeral cache breakpoint on the newest
@@ -353,6 +717,11 @@ func (s *agentSession) callModel(ctx context.Context, params anthropic.MessageNe
 			return resp, nil
 		}
 		lastErr = err
+		// The turn itself was cancelled (user stop / deadline) — not a model
+		// failure. Bail without retries or a spurious "retrying…" post.
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		fmt.Fprintf(os.Stderr, "claw-runner: model call attempt %d failed: %v\n", attempt+1, err)
 		// Only transient failures are worth retrying. A 400/401/403 is permanent —
 		// retrying spams the thread with "retrying…" for a request that can't succeed.
@@ -401,28 +770,64 @@ func shortErr(err error) string {
 	}
 }
 
-// heartbeat posts an in-thread progress update roughly every 60s while a turn
-// runs long, so slow operations report what they're doing instead of going
-// silent. The first post is at ~60s, so quick turns stay clean.
+// progressMessage builds the heartbeat text: what the agent is doing right now,
+// plus a short recap of the steps it already took this turn — so a long task
+// reads as a summary of work rather than a single opaque line.
+func (s *agentSession) progressMessage() string {
+	current, done := s.activitySummary()
+	clip := func(t string) string {
+		if len(t) > 200 {
+			return t[:200] + "…"
+		}
+		return t
+	}
+	var b strings.Builder
+	if current != "" {
+		b.WriteString("⏳ " + clip(current))
+	} else {
+		b.WriteString("⏳ Still working on it…")
+	}
+	if len(done) > 0 {
+		b.WriteString("\n_So far:_")
+		for _, d := range done {
+			b.WriteString("\n• " + clip(d))
+		}
+	}
+	return b.String()
+}
+
+// heartbeat posts an in-thread progress update on an exponential-backoff schedule
+// while a turn runs long, so slow operations report what they're doing instead of
+// going silent — without spamming the thread on a genuinely long task. Intervals
+// double from 1m: posts land at 1m, 2m, 4m, then every 4m after. The first post is
+// at ~60s, so quick turns stay clean.
 func (s *agentSession) heartbeat(ctx context.Context) {
-	if s.controllerURL == "" || s.runID == "" {
+	if s.controllerURL == "" || s.currentRunID() == "" {
 		return
 	}
-	t := time.NewTicker(60 * time.Second)
-	defer t.Stop()
+	const (
+		firstInterval = 60 * time.Second
+		maxInterval   = 4 * time.Minute
+	)
+	interval := firstInterval
+	lastPosted := ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			msg := "⏳ Still working on it…"
-			if step := s.getStep(); step != "" {
-				if len(step) > 280 {
-					step = step[:280] + "…"
-				}
-				msg = "⏳ " + step
+		case <-time.After(interval):
+			// Never post the same update twice in a row: when nothing has changed
+			// (e.g. a long wait on an approval), a repeated "On it. Let me…" reads
+			// like the agent re-announcing the same work every minute.
+			if msg := s.progressMessage(); msg != lastPosted {
+				s.postProgress(ctx, msg)
+				lastPosted = msg
 			}
-			s.postProgress(ctx, msg)
+			if interval < maxInterval {
+				if interval *= 2; interval > maxInterval {
+					interval = maxInterval
+				}
+			}
 		}
 	}
 }
@@ -430,7 +835,7 @@ func (s *agentSession) heartbeat(ctx context.Context) {
 // postProgress sends an intermediate, in-thread status message (best-effort).
 func (s *agentSession) postProgress(ctx context.Context, text string) {
 	body, _ := json.Marshal(map[string]string{"text": text})
-	url := fmt.Sprintf("%s/v1/runs/%s/progress", s.controllerURL, s.runID)
+	url := fmt.Sprintf("%s/v1/runs/%s/progress", s.controllerURL, s.currentRunID())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return
@@ -448,7 +853,7 @@ func (s *agentSession) postProgress(ctx context.Context, text string) {
 // the user an intake link, then polls until the value is provided, writes it to
 // the tmpfs secrets dir, and points $GOOGLE_APPLICATION_CREDENTIALS at it.
 func (s *agentSession) requestSecret(ctx context.Context, name, description, reason, envVar string) string {
-	if s.controllerURL == "" || s.runID == "" || s.token == "" {
+	if s.controllerURL == "" || s.currentRunID() == "" || s.token == "" {
 		return "request_secret is unavailable in this run (no controller binding)."
 	}
 	// Retrieve-first: if access is already granted + the value is present, install
@@ -459,14 +864,20 @@ func (s *agentSession) requestSecret(ctx context.Context, name, description, rea
 	// Otherwise ask the controller: it provisions (DMs a link) or opens an access
 	// request to the secret's approvers, depending on whether it exists/is granted.
 	body, _ := json.Marshal(map[string]string{"name": name, "description": description, "reason": reason})
-	if err := s.post(ctx, fmt.Sprintf("/v1/runs/%s/request-secret", s.runID), body); err != nil {
+	if err := s.post(ctx, fmt.Sprintf("/v1/runs/%s/request-secret", s.currentRunID()), body); err != nil {
 		return "Couldn't request the secret: " + err.Error()
 	}
 	// Poll briefly in case it's approved/provided right away.
+	s.setStep("Waiting for access to *" + name + "* to be approved or provided…")
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
 		if path, content, ok := s.fetchRequested(ctx, name); ok {
 			return s.install(ctx, name, path, content, envVar)
+		}
+		// A new message outranks the wait: stop early so the model sees it now
+		// instead of after the full poll (it may cancel this whole task).
+		if s.hasInterrupts() {
+			return fmt.Sprintf("Stopped waiting for *%s* early — a new Slack message just arrived (it follows this result); handle it first. The request is still open: call request_secret again with name=%q once it's approved/provided.", name, name)
 		}
 		select {
 		case <-ctx.Done():
@@ -504,6 +915,48 @@ func (s *agentSession) install(ctx context.Context, name, path string, content [
 	return fmt.Sprintf("Got it — *%s* is now installed at %s.%s Retry your task now.", name, path, extra)
 }
 
+// publishDocument stores a markdown document via the controller and returns a
+// tool-result string carrying the share URL and its exact expiry, so the agent
+// can (and is instructed to) relay both to the user. An artifactID reshares an
+// already-published document under a fresh link, revoking the old ones.
+func (s *agentSession) publishDocument(ctx context.Context, title, markdown, artifactID string) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || s.token == "" {
+		return "publish_document is unavailable in this run (no controller binding)."
+	}
+	body, _ := json.Marshal(map[string]string{"title": title, "content": markdown, "artifactId": artifactID})
+	url := fmt.Sprintf("%s/v1/runs/%s/artifacts", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "Couldn't publish the document: " + err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "Couldn't publish the document: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound && artifactID != "" {
+		return fmt.Sprintf("No document with artifact_id %q exists in this conversation — publish it again with the full markdown instead.", artifactID)
+	}
+	if resp.StatusCode >= 300 {
+		return "Couldn't publish the document: controller returned " + resp.Status
+	}
+	var out struct{ ArtifactID, URL, ExpiresAt string }
+	if json.NewDecoder(resp.Body).Decode(&out) != nil || out.URL == "" {
+		return "Couldn't publish the document: unexpected controller response."
+	}
+	expiry := out.ExpiresAt
+	if t, e := time.Parse(time.RFC3339, out.ExpiresAt); e == nil {
+		expiry = fmt.Sprintf("%s (in %s)", t.UTC().Format("Mon Jan 2, 15:04 MST"), time.Until(t).Round(time.Minute))
+	}
+	return fmt.Sprintf("Published %q.\nShare link: %s\nLink expires: %s\nartifact_id: %s (keep for resharing)\n"+
+		"Give the user the link, tell them exactly when it expires, and that saying \"reshare\" here mints a fresh link.",
+		title, out.URL, expiry, out.ArtifactID)
+}
+
 func (s *agentSession) post(ctx context.Context, path string, body []byte) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.controllerURL+path, bytes.NewReader(body))
 	if err != nil {
@@ -524,7 +977,7 @@ func (s *agentSession) post(ctx context.Context, path string, body []byte) error
 
 // fetchRequested returns (path, decoded value, true) once the secret is provided.
 func (s *agentSession) fetchRequested(ctx context.Context, name string) (string, []byte, bool) {
-	url := fmt.Sprintf("%s/v1/runs/%s/requested-secret?name=%s", s.controllerURL, s.runID, name)
+	url := fmt.Sprintf("%s/v1/runs/%s/requested-secret?name=%s", s.controllerURL, s.currentRunID(), name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", nil, false

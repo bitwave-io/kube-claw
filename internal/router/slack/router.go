@@ -97,8 +97,13 @@ var slackUserMention = regexp.MustCompile(`<@[UW][A-Z0-9]+>`)
 // mentionsSomeoneElse reports whether the text @mentions a user. Callers only
 // consult it on the !mentioned path, so any user mention present is by
 // definition someone other than the bot — the message has an addressee and an
-// unprompted reply would be butting in.
-func mentionsSomeoneElse(text string) bool {
+// unprompted reply would be butting in. The "<@sender>: " prefix that
+// agentText prepends to EVERY message is the speaker's own id, not an
+// addressee — strip it first or nothing unmentioned ever passes the gate.
+func mentionsSomeoneElse(text, sender string) bool {
+	if sender != "" {
+		text = strings.TrimPrefix(text, "<@"+sender+">:")
+	}
 	return slackUserMention.MatchString(text)
 }
 
@@ -298,7 +303,7 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 	// also avoids spinning up a run pod for chatter we'd never reply to.
 	// A message that @mentions someone ELSE is addressed to that person, never to
 	// the bot — skip it outright (deterministically, before the LLM gate).
-	if !mentioned && (mentionsSomeoneElse(text) || !r.shouldRespond(ctx, text)) {
+	if !mentioned && (mentionsSomeoneElse(text, user) || !r.shouldRespond(ctx, text)) {
 		return "", nil
 	}
 	// New session → let the router pick the best-fit agent (it carries its own
@@ -353,9 +358,13 @@ func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, thread
 		return "", nil // not a thread the bot started
 	}
 	// In a busy thread two humans may be talking to each other — don't butt into
-	// every reply. An @mention always proceeds; otherwise a default-open gate only
+	// every reply. An @mention always proceeds. A reply that @mentions someone
+	// ELSE is addressed to that person and is skipped deterministically, exactly
+	// like the channel path — "@Pat could we give the bot more access?" is a
+	// question for Pat even though it's about the bot, and the LLM gate has
+	// proven too generous with these. Otherwise a default-open gate only
 	// suppresses messages clearly addressed to someone else.
-	if !mentioned && !r.shouldRespondInThread(ctx, text) {
+	if !mentioned && (mentionsSomeoneElse(text, user) || !r.shouldRespondInThread(ctx, text)) {
 		return "", nil
 	}
 	runID := "run-" + randHex()

@@ -10,16 +10,19 @@ import (
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/traego/kube-claw/internal/artifacts"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
 )
 
-// UIServer serves ONLY the one-time secret-intake page (DESIGN.md §8.3). It runs
-// on a SEPARATE listener from the internal API so an Ingress misconfig can never
+// UIServer serves ONLY the token-gated public pages — the one-time secret-intake
+// form (DESIGN.md §8.3) and time-bound artifact share links. It runs on a
+// SEPARATE listener from the internal API so an Ingress misconfig can never
 // reach /v1/* — this mux has no other routes registered.
 type UIServer struct {
-	Addr    string
-	Secrets *secrets.Service
+	Addr      string
+	Secrets   *secrets.Service
+	Artifacts *artifacts.Service
 }
 
 func (s *UIServer) NeedLeaderElection() bool { return false }
@@ -28,6 +31,7 @@ func (s *UIServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ui/secret-intake/{token}", s.form)
 	mux.HandleFunc("POST /ui/secret-intake/{token}", s.submit)
+	mux.HandleFunc("GET /d/{token}", s.artifact)
 	return mux
 }
 
@@ -87,6 +91,35 @@ func (s *UIServer) submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired link", http.StatusNotFound)
 	default:
 		logf.Log.WithName("ui").Error(err, "intake submit failed") // never logs the value
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+// artifact serves a published document behind its time-bound share token, as raw
+// markdown — the link is made to be handed to another tool (curl, an agent's URL
+// fetch), and serving text keeps this listener free of rendered-HTML/XSS surface.
+// Tokens are multi-read until expiry; an expired or reshared link gets a 410
+// telling the reader how to get a fresh one.
+func (s *UIServer) artifact(w http.ResponseWriter, r *http.Request) {
+	a, expires, err := s.Artifacts.Resolve(r.Context(), r.PathValue("token"))
+	switch {
+	case err == nil:
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+		w.Header().Set("Cache-Control", "no-store") // the link outlives caches, not vice versa
+		w.Header().Set("Expires", expires.UTC().Format(http.TimeFormat))
+		fmt.Fprint(w, a.Content)
+	case errors.Is(err, store.ErrTokenExpired):
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusGone)
+		fmt.Fprintf(w, "This share link expired at %s or was replaced by a newer one.\n"+
+			"Ask the bot to reshare the document in the original Slack thread to get a fresh link.\n",
+			expires.UTC().Format(time.RFC3339))
+	case errors.Is(err, store.ErrNotFound):
+		http.Error(w, "invalid link", http.StatusNotFound)
+	default:
+		logf.Log.WithName("ui").Error(err, "artifact resolve failed")
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }

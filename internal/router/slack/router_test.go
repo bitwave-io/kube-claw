@@ -34,9 +34,9 @@ func TestMatchRoute(t *testing.T) {
 
 func TestParseAction(t *testing.T) {
 	for _, tc := range []struct {
-		in            string
+		in              string
 		wantAct, wantID string
-		ok            bool
+		ok              bool
 	}{
 		{"approve|req-1", "approve", "req-1", true},
 		{"deny|req-2", "deny", "req-2", true},

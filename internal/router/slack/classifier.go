@@ -72,9 +72,18 @@ func (c *Classifier) ShouldRespondInThread(ctx context.Context, message string) 
 	}
 	sys := "An AI cloud-operations assistant is active in a Slack thread it was brought into. You decide " +
 		"whether the latest reply in that thread is meant for the assistant. Reply YES unless the message is " +
-		"CLEARLY not addressed to it — e.g. it @mentions or names another person as the one being asked, or " +
-		"it is plainly a side-conversation between two humans. Follow-up questions, corrections, " +
-		"acknowledgements, and anything ambiguous ARE for the assistant: reply YES. Output ONLY YES or NO."
+		"CLEARLY not addressed to it — e.g. it @mentions or names another person as the one being asked, it " +
+		"answers a question a specific person raised, or it is plainly a side-conversation between two humans. " +
+		"People often talk to EACH OTHER *about* the assistant — what access it should have, what it could do " +
+		"for them (\"we could have it audit the repos\") — while asking a colleague, not the assistant: those " +
+		"are NO. Follow-up questions, new instructions, corrections, approvals of something the assistant " +
+		"itself proposed, and anything ambiguous ARE for the assistant: reply YES. Output ONLY YES or NO.\n\n" +
+		"Examples:\n" +
+		"\"can you also check the staging cluster?\" → YES\n" +
+		"\"they're approved, try again\" → YES\n" +
+		"\"actually skip that, just the prod project\" → YES\n" +
+		"\"<@U0PAT> could we give it access to the other projects too?\" → NO (asks Pat, not the assistant)\n" +
+		"\"Sarah's got the billing question\" → NO"
 	return c.yesNo(ctx, sys, "Thread reply:\n"+message, true)
 }
 

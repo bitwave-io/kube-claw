@@ -163,13 +163,17 @@ capability (e.g. a `gcp-cost` agent on the gcloud image, a general `helper` agen
 ### The agent loop
 
 `claw-runner` runs a Claude tool-use loop (model `claude-opus-4-8`, adaptive
-thinking) with two tools:
+thinking) with three tools:
 
 - **`bash`** — runs shell commands in the container (whatever the base image
   provides: `gcloud`/`bq`, `aws`, `az`, `curl`, `python3`, …).
 - **`request_secret`** — requests *and* retrieves a credential on demand (DMs the
   user an intake link, then installs the provided value into the pod and wires up
   the env var / `gcloud auth`).
+- **`publish_document`** — publishes a Markdown doc (a design doc, spec, runbook)
+  behind a **time-bound share link** you can hand to tools outside Slack — e.g. a
+  local coding agent. The reply states the expiry; say "reshare" in the thread for
+  a fresh link. See [`docs/document-sharing.md`](docs/document-sharing.md).
 
 Without an Anthropic key the runner falls back to a stub (still proves the
 materialize → respond path).

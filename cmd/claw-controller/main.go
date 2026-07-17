@@ -30,6 +30,7 @@ import (
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/apihttp"
 	"github.com/traego/kube-claw/internal/approvals"
+	"github.com/traego/kube-claw/internal/artifacts"
 	"github.com/traego/kube-claw/internal/controller"
 	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
@@ -54,6 +55,7 @@ func init() {
 func main() {
 	var dataDir, probeAddr, apiAddr, uiAddr, uiBaseURL, runnerImage, selfURL, anthropicSecret, defaultAgent, logFormat, cloudBaseImages string
 	var enableRouter bool
+	var artifactTTL, artifactMaxTTL time.Duration
 	flag.StringVar(&dataDir, "data-dir", "/var/lib/claw", "directory for the SQLite store")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe bind address")
 	flag.StringVar(&apiAddr, "api-bind-address", ":8443", "HTTP API bind address")
@@ -64,6 +66,8 @@ func main() {
 	flag.StringVar(&anthropicSecret, "anthropic-secret", "claw-anthropic-key", "K8s secret (key \"api-key\") injected into run pods for the agent loop")
 	flag.StringVar(&defaultAgent, "default-agent", "general", "agent assigned when a Slack channel is onboarded")
 	flag.StringVar(&cloudBaseImages, "cloud-base-images", "", "comma-separated name=image overrides for the seeded cloud base images (gcloud/aws/azure); empty = derive from --runner-image")
+	flag.DurationVar(&artifactTTL, "artifact-ttl", 24*time.Hour, "default lifetime of published-document share links")
+	flag.DurationVar(&artifactMaxTTL, "artifact-max-ttl", 7*24*time.Hour, "cap on per-publish share-link lifetime overrides")
 	flag.BoolVar(&enableRouter, "enable-router", true, "run the embedded Slack router")
 	flag.StringVar(&logFormat, "log-format", "console", "log output format: \"console\" (human-readable, for local dev) or \"json\" (structured, for cloud log backends)")
 	flag.Parse()
@@ -125,6 +129,7 @@ func main() {
 	idProvider := &identity.KubernetesSAProvider{Client: clientset, Audience: "claw-controller"}
 	approvalSvc := &approvals.Service{Store: st, Secrets: secSvc, Reader: mgr.GetAPIReader()}
 	gitRepoSvc := &gitrepo.Service{Store: st, Reader: mgr.GetAPIReader()}
+	artifactSvc := &artifacts.Service{Store: st, TTL: artifactTTL, MaxTTL: artifactMaxTTL}
 
 	// Slack connector router (channel→agent routing + run creation). Built when
 	// routes are configured; usable via the fake event endpoint regardless of
@@ -185,6 +190,7 @@ func main() {
 		Identity:              idProvider,
 		Signer:                signer,
 		Approvals:             approvalSvc,
+		Artifacts:             artifactSvc,
 		GitRepos:              gitRepoSvc,
 		Router:                slackRt,
 		Notifier:              slackNotifier,
@@ -195,8 +201,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Secret-intake UI on a SEPARATE listener (only /ui/secret-intake/*).
-	if err := mgr.Add(&apihttp.UIServer{Addr: uiAddr, Secrets: secSvc}); err != nil {
+	// Public token-gated pages (secret intake + artifact share links) on a
+	// SEPARATE listener.
+	if err := mgr.Add(&apihttp.UIServer{Addr: uiAddr, Secrets: secSvc, Artifacts: artifactSvc}); err != nil {
 		log.Error(err, "unable to add UI server")
 		os.Exit(1)
 	}

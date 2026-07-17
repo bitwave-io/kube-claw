@@ -209,6 +209,22 @@ type Tx interface {
 	// SetGitRepoRequestStatus updates a request's status.
 	SetGitRepoRequestStatus(id, status string) error
 
+	// --- artifacts (shareable documents, e.g. design docs) ---
+
+	// CreateArtifact stores a published document (immutable once written).
+	CreateArtifact(a Artifact) error
+	// GetArtifact returns an artifact by id, or ErrNotFound.
+	GetArtifact(id string) (Artifact, error)
+	// CreateArtifactToken stores a time-bound share token (hash only). Unlike
+	// intake tokens, share tokens are multi-read until they expire.
+	CreateArtifactToken(tokenHash, artifactID, expiresAt string) error
+	// ResolveArtifactToken returns the artifact for a live token hash. Returns
+	// ErrNotFound for unknown, ErrTokenExpired for expired OR revoked (no oracle
+	// distinguishing the two), plus the token's expiry for display.
+	ResolveArtifactToken(tokenHash string) (Artifact, string, error)
+	// RevokeArtifactTokens revokes all live tokens for an artifact (reshare).
+	RevokeArtifactTokens(artifactID string) error
+
 	// --- schedules (cron-triggered agent invocations) ---
 
 	// SetSchedule creates or replaces a schedule.
@@ -371,6 +387,20 @@ type Run struct {
 	CreatedAt      string `json:"createdAt"`
 	StartedAt      string `json:"startedAt,omitempty"`
 	CompletedAt    string `json:"completedAt,omitempty"`
+}
+
+// Artifact is a document an agent published for sharing outside Slack (e.g. a
+// design doc handed to another tool). Content is immutable once published —
+// a revised doc is a new artifact. Access goes through time-bound share tokens
+// (artifact_tokens); the artifact itself never expires, so a spent link can be
+// reshared without regenerating the document.
+type Artifact struct {
+	ID        string `json:"id"`
+	RunID     string `json:"runId,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+	Title     string `json:"title"`
+	Content   string `json:"content"` // markdown; never secret material
+	CreatedAt string `json:"createdAt"`
 }
 
 // Output is a single result a run produced (DESIGN.md §22 status.outputs).

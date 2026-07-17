@@ -50,7 +50,12 @@ func (s *Server) sessionHistory(w http.ResponseWriter, r *http.Request) {
 			if outs, e := tx.ListOutputs(run.ID); e == nil && len(outs) > 0 {
 				out = outs[len(outs)-1].Content
 			}
-			if in != "" && out != "" {
+			// Output may legitimately be empty: coalesced/declined runs complete
+			// with a "none" output, but their INPUT is still part of the
+			// conversation — dropping it would lose instructions and corrections
+			// across a pod restart. Emit them as user-only turns; the runner
+			// folds them into the adjacent answered turn on replay.
+			if in != "" {
 				turns = append(turns, turn{Input: in, Output: out})
 			}
 		}
