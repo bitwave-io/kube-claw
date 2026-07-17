@@ -28,6 +28,8 @@ import (
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/approvals"
+	"github.com/traego/kube-claw/internal/connector"
+	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/secrets"
@@ -36,17 +38,19 @@ import (
 
 // Server is a controller-runtime Runnable that serves the HTTP API.
 type Server struct {
-	Addr     string
-	Store    store.Store
-	Reader   client.Reader     // uncached k8s reader (mgr.GetAPIReader)
-	K8s      client.Client     // writer, for creating Agent CRs from the API
-	Secrets  *secrets.Service  // secret authority
-	UIBase    string             // base URL of the intake UI (for returned links)
-	Identity  identity.Provider   // /login credential verifier
-	Signer    *identity.Signer    // claw session token signer
+	Addr      string
+	Store     store.Store
+	Reader    client.Reader         // uncached k8s reader (mgr.GetAPIReader)
+	K8s       client.Client         // writer, for creating Agent CRs from the API
+	Secrets   *secrets.Service      // secret authority
+	UIBase    string                // base URL of the intake UI (for returned links)
+	Identity  identity.Provider     // /login credential verifier
+	Signer    *identity.Signer      // claw session token signer
 	Approvals *approvals.Service    // shared approval path
+	GitRepos  *gitrepo.Service      // git-repo access approval authority
 	Router    *slackrouter.Router   // connector routing (nil if no routes configured)
 	Notifier  *slackrouter.Notifier // posts replies/approvals to Slack (nil if no bot token)
+	Deliverer *connector.Deliverer  // pushes run events to connector callbacks (nil = default)
 	// AdminPassword gates the admin dashboard (/ui/*) with HTTP basic auth
 	// (user "admin"). Empty = no auth (local/dev). The secret-intake UI runs on a
 	// separate listener and is never gated here (it's one-time-token protected).
@@ -110,10 +114,28 @@ func (s *Server) handler() http.Handler {
 	if s.EnableFakeSlackEvents {
 		mux.HandleFunc("POST /v1/connectors/slack/events", s.slackEvent)
 	}
+	// Connector plane: management is admin-gated (adminOK), ingest is
+	// API-key-gated — the one /v1 surface meant for public exposure.
+	mux.HandleFunc("POST /v1/connectors", s.createConnector)
+	mux.HandleFunc("GET /v1/connectors", s.listConnectors)
+	mux.HandleFunc("DELETE /v1/connectors/{id}", s.deleteConnector)
+	mux.HandleFunc("POST /v1/connectors/{id}/rotate-key", s.rotateConnectorKey)
+	mux.HandleFunc("POST /v1/connectors/{id}/messages", s.connectorIngest)
 	mux.HandleFunc("GET /v1/sessions/{id}/history", s.sessionHistory)
 	mux.HandleFunc("GET /v1/runs/{id}/available-secrets", s.availableSecrets)
 	mux.HandleFunc("POST /v1/runs/{id}/request-secret", s.requestSecret)
 	mux.HandleFunc("GET /v1/runs/{id}/requested-secret", s.requestedSecret)
+	mux.HandleFunc("POST /v1/gitrepos", s.createGitRepo)
+	mux.HandleFunc("GET /v1/gitrepos", s.listGitRepos)
+	mux.HandleFunc("DELETE /v1/gitrepos/{name}", s.deleteGitRepo)
+	mux.HandleFunc("GET /v1/gitrepo-requests", s.listGitRepoRequests)
+	mux.HandleFunc("POST /v1/gitrepo-requests/{id}/approve", s.approveGitRepoRequest)
+	mux.HandleFunc("POST /v1/gitrepo-requests/{id}/deny", s.denyGitRepoRequest)
+	mux.HandleFunc("GET /v1/gitrepo-grants", s.listGitRepoGrants)
+	mux.HandleFunc("POST /v1/gitrepo-grants/{id}/revoke", s.revokeGitRepoGrant)
+	mux.HandleFunc("GET /v1/runs/{id}/available-gitrepos", s.availableGitRepos)
+	mux.HandleFunc("POST /v1/runs/{id}/request-gitrepo", s.requestGitRepo)
+	mux.HandleFunc("GET /v1/runs/{id}/requested-gitrepo", s.requestedGitRepo)
 	mux.HandleFunc("POST /v1/sessions/{id}/claim-next", s.claimNextTurn)
 	mux.HandleFunc("POST /v1/sessions/{id}/sleep", s.sessionSleep)
 	mux.HandleFunc("GET /v1/prompts", s.listPrompts)
@@ -135,6 +157,11 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/requests", s.requestsPage)
 	mux.HandleFunc("POST /ui/requests/approve", s.uiApproveRequest)
 	mux.HandleFunc("POST /ui/requests/deny", s.uiDenyRequest)
+	mux.HandleFunc("GET /ui/gitrepos", s.gitReposPage)
+	mux.HandleFunc("POST /ui/gitrepos/create", s.uiCreateGitRepo)
+	mux.HandleFunc("POST /ui/gitrepos/delete", s.uiDeleteGitRepo)
+	mux.HandleFunc("POST /ui/gitrepo-requests/approve", s.uiApproveGitRepoRequest)
+	mux.HandleFunc("POST /ui/gitrepo-requests/deny", s.uiDenyGitRepoRequest)
 	mux.HandleFunc("GET /ui/audit", s.auditPage)
 	mux.HandleFunc("GET /ui/conversations", s.conversationsPage)
 	mux.HandleFunc("GET /ui/agents", s.agentsPage)
@@ -330,11 +357,10 @@ type postOutputReq struct {
 	Content string `json:"content"`
 }
 
-// postOutput records a runner's output and marks the run Succeeded. This is the
-// runner→controller callback (DESIGN.md §36). Auth (claw session token) lands in
-// Phase 5; for now it is unauthenticated on the cluster-internal API.
 // postProgress posts an intermediate, in-thread status update for a running turn
-// (no output recorded, run not completed) so long operations report progress.
+// (run not completed) so long operations report progress. The update is also
+// recorded as a "progress" output row: it marks the Slack thread as in-use (so
+// postOutput keeps the final reply there) and shows in the run view mid-turn.
 func (s *Server) postProgress(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.authRunInSession(r, id) {
@@ -349,12 +375,20 @@ func (s *Server) postProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var run store.Run
-	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
 		got, e := tx.GetRun(id)
+		if e != nil {
+			return e
+		}
 		run = got
-		return e
-	}); err != nil {
+		return tx.AppendOutput(id, store.Output{Kind: "progress", Content: req.Text})
+	})
+	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if s.Notifier != nil {
@@ -364,9 +398,15 @@ func (s *Server) postProgress(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if cid := connector.SourceConnectorID(run.Source); cid != "" {
+		s.deliverToConnector(cid, run, "progress", req.Text)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "posted"})
 }
 
+// postOutput records a runner's output and marks the run Succeeded. This is the
+// runner→controller callback (DESIGN.md §36). Auth (claw session token) lands in
+// Phase 5; for now it is unauthenticated on the cluster-internal API.
 func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.authRunInSession(r, id) {
@@ -405,13 +445,14 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// #2: post the agent's reply back to Slack, and clear the 👀 on the
-	// triggering message. Channel config decides thread vs in-channel.
+	// triggering message. Channel config decides thread vs in-channel, but an
+	// already-threaded conversation always stays in its thread.
 	if s.Notifier != nil {
 		if ch := slackrouter.SlackChannel(run.Source); ch != "" {
 			threadTS := run.SessionID // default: reply in-thread
 			_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
-				if cfg, e := tx.GetChannelConfig(ch); e == nil && !cfg.ThreadOnly {
-					threadTS = "" // channel allows top-level replies
+				if replyTopLevel(tx, run, ch) {
+					threadTS = ""
 				}
 				return nil
 			})
@@ -423,7 +464,45 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Connector-triggered runs push the answer to the registered callback URL
+	// (the webhook twin of the Slack reply above).
+	if cid := connector.SourceConnectorID(run.Source); cid != "" {
+		s.deliverToConnector(cid, run, "output", req.Content)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
+}
+
+// replyTopLevel reports whether a run's final answer may post to the channel
+// top-level instead of its thread. The channel config must allow in-channel
+// replies AND the conversation must not already be threaded — once anything
+// lives in the thread (the trigger was itself a thread reply, earlier turns ran
+// in this session, or this run posted progress there), the answer stays with
+// it. Splitting one conversation between a thread and the channel is worse
+// than either mode alone.
+func replyTopLevel(tx store.Tx, run store.Run, channel string) bool {
+	if run.SessionID == "" {
+		return true // no thread to reply into
+	}
+	cfg, err := tx.GetChannelConfig(channel)
+	if err != nil || cfg.ThreadOnly {
+		return false
+	}
+	if ts := slackrouter.SlackEventTS(run.Source); ts != "" && ts != run.SessionID {
+		return false // triggered from inside an existing thread
+	}
+	if runs, err := tx.ListRunsBySession(run.SessionID, 2); err != nil || len(runs) > 1 {
+		return false // multi-turn conversation — it lives in the thread
+	}
+	outs, err := tx.ListOutputs(run.ID)
+	if err != nil {
+		return false
+	}
+	for _, o := range outs {
+		if o.Kind == "progress" {
+			return false // progress updates already went to the thread
+		}
+	}
+	return true
 }
 
 // --- secrets (Phase 3) ---
@@ -459,9 +538,9 @@ func (s *Server) createSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	path := "/ui/secret-intake/" + tok
 	writeJSON(w, http.StatusCreated, map[string]string{
-		"id":          sec.ID,
-		"intakePath":  path,
-		"intakeURL":   s.UIBase + path,
+		"id":         sec.ID,
+		"intakePath": path,
+		"intakeURL":  s.UIBase + path,
 	})
 }
 

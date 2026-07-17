@@ -20,6 +20,7 @@ import (
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/approvals"
+	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
@@ -70,6 +71,7 @@ func fullServer(t *testing.T, seed ...client.Object) *Server {
 	return &Server{
 		Store: st, Reader: reader, Secrets: secSvc, Signer: signer, UIBase: "http://ui",
 		Approvals: &approvals.Service{Store: st, Secrets: secSvc, Reader: reader},
+		GitRepos:  &gitrepo.Service{Store: st, Reader: reader},
 	}
 }
 
@@ -201,6 +203,94 @@ func TestPostOutputAndGetRun(t *testing.T) {
 	}
 }
 
+// TestPostProgressRecordsOutput: a progress update is stored as a "progress"
+// output row (the marker replyTopLevel uses, and visible mid-run in the UI).
+func TestPostProgressRecordsOutput(t *testing.T) {
+	s := fullServer(t)
+	h := s.handler()
+	_ = s.Store.Tx(context.Background(), func(tx store.Tx) error {
+		return tx.CreateRun(store.Run{ID: "run-1", AgentNamespace: "claw-agents", AgentName: "gcp-cost", Phase: "Running"})
+	})
+	tok, _ := s.Signer.Issue("run-1", nil, time.Hour)
+	if rr := doAuth(t, h, "POST", "/v1/runs/run-1/progress", `{"text":"still digging"}`, tok); rr.Code != 200 {
+		t.Fatalf("postProgress = %d (%s)", rr.Code, rr.Body)
+	}
+	var outs []store.Output
+	_ = s.Store.Tx(context.Background(), func(tx store.Tx) error {
+		got, e := tx.ListOutputs("run-1")
+		outs = got
+		return e
+	})
+	if len(outs) != 1 || outs[0].Kind != "progress" || outs[0].Content != "still digging" {
+		t.Fatalf("outputs = %+v, want one progress row", outs)
+	}
+}
+
+// TestReplyTopLevel: the final reply may leave the thread only when the channel
+// config allows it AND nothing already lives in the thread.
+func TestReplyTopLevel(t *testing.T) {
+	s := fullServer(t)
+	ctx := context.Background()
+	mkRun := func(id, session, eventTS string) store.Run {
+		return store.Run{
+			ID: id, AgentNamespace: "claw-agents", AgentName: "gcp-cost",
+			SessionID: session, Phase: "Running",
+			Source: `{"trigger":"slack","channel":"C1","event":"` + eventTS + `","user":"U1"}`,
+		}
+	}
+	check := func(t *testing.T, run store.Run, want bool) {
+		t.Helper()
+		var got bool
+		_ = s.Store.Tx(ctx, func(tx store.Tx) error {
+			got = replyTopLevel(tx, run, "C1")
+			return nil
+		})
+		if got != want {
+			t.Fatalf("replyTopLevel(%s) = %v, want %v", run.ID, got, want)
+		}
+	}
+
+	fresh := mkRun("run-a", "100.1", "100.1")
+	_ = s.Store.Tx(ctx, func(tx store.Tx) error { return tx.CreateRun(fresh) })
+
+	// No channel config → stay in-thread.
+	check(t, fresh, false)
+
+	// Threads-only config → stay in-thread.
+	_ = s.Store.Tx(ctx, func(tx store.Tx) error {
+		return tx.SetChannelConfig(store.ChannelConfig{Channel: "C1", AgentNamespace: "claw-agents", AgentName: "gcp-cost", ThreadOnly: true})
+	})
+	check(t, fresh, false)
+
+	// In-channel config + fresh unthreaded exchange → top-level allowed.
+	_ = s.Store.Tx(ctx, func(tx store.Tx) error {
+		return tx.SetChannelConfig(store.ChannelConfig{Channel: "C1", AgentNamespace: "claw-agents", AgentName: "gcp-cost", ThreadOnly: false})
+	})
+	check(t, fresh, true)
+
+	// Progress was posted in-thread → stay in-thread (the screenshot bug).
+	_ = s.Store.Tx(ctx, func(tx store.Tx) error {
+		return tx.AppendOutput("run-a", store.Output{Kind: "progress", Content: "working…"})
+	})
+	check(t, fresh, false)
+
+	// Trigger was itself a thread reply → stay in-thread.
+	threaded := mkRun("run-b", "200.1", "200.9")
+	_ = s.Store.Tx(ctx, func(tx store.Tx) error { return tx.CreateRun(threaded) })
+	check(t, threaded, false)
+
+	// Second turn in a session → stay in-thread.
+	turn1 := mkRun("run-c", "300.1", "300.1")
+	turn2 := mkRun("run-d", "300.1", "300.5")
+	_ = s.Store.Tx(ctx, func(tx store.Tx) error {
+		if e := tx.CreateRun(turn1); e != nil {
+			return e
+		}
+		return tx.CreateRun(turn2)
+	})
+	check(t, turn1, false)
+}
+
 func TestLoginHandler(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -213,7 +303,7 @@ func TestLoginHandler(t *testing.T) {
 	s.Identity = stubIdentity{p: identity.Principal{
 		ServiceAccount: "system:serviceaccount:claw-agents:claw-agent-gcp-cost",
 		Namespace:      "claw-agents", SAName: "claw-agent-gcp-cost",
-		PodName:        "run-1-pod", PodUID: "uid-1",
+		PodName: "run-1-pod", PodUID: "uid-1",
 	}}
 	h := s.handler()
 

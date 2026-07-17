@@ -6,7 +6,7 @@ image:
   # <semver> (docker/metadata-action strips the leading v from the git tag) and
   # sha-<commit> tags; bump this in lockstep with Chart.yaml appVersion.
   # Quickstart users can override to :latest if desired.
-  tag: "0.2.3"
+  tag: "0.3.1"
   pullPolicy: IfNotPresent
 
 # Namespace agents live in. Created by the deploy script (scripts/deploy-gke.sh /
@@ -27,7 +27,7 @@ controller:
   logFormat: console
   # Image the run engine launches for each run Job (DESIGN.md §11). Pinned to the
   # same release tag as the controller (see image.tag note re: :latest).
-  runnerImage: docker.io/bitwavecode/kube-claw-runner:0.2.3
+  runnerImage: docker.io/bitwavecode/kube-claw-runner:0.3.1
   # Admin dashboard (/ui) basic-auth password is read from this Secret (key
   # "password", user "admin"). Absent secret/key => the admin UI is unauthenticated.
   # scripts/install.sh creates it; create out-of-band otherwise.

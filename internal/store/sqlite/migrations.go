@@ -156,6 +156,62 @@ var migrations = []string{
 		updated_at TEXT NOT NULL,
 		PRIMARY KEY (agent_ns, agent_name)
 	);`,
+	`CREATE TABLE IF NOT EXISTS connectors (
+		id             TEXT PRIMARY KEY,
+		name           TEXT NOT NULL UNIQUE,
+		callback_url   TEXT NOT NULL,
+		api_key_hash   TEXT NOT NULL UNIQUE,
+		signing_secret TEXT NOT NULL,
+		agent_ns       TEXT NOT NULL,
+		agent_name     TEXT NOT NULL,
+		disabled       INTEGER NOT NULL DEFAULT 0,
+		created_at     TEXT NOT NULL
+	);`,
+	`CREATE TABLE IF NOT EXISTS git_repos (
+		id               TEXT PRIMARY KEY,
+		namespace        TEXT NOT NULL,
+		name             TEXT NOT NULL,
+		url              TEXT NOT NULL,
+		description      TEXT,
+		read_credential  TEXT,
+		write_credential TEXT,
+		created_at       TEXT NOT NULL,
+		UNIQUE(namespace, name)
+	);`,
+	`CREATE TABLE IF NOT EXISTS git_repo_granters (
+		repo_id   TEXT NOT NULL,
+		principal TEXT NOT NULL
+	);`,
+	`CREATE TABLE IF NOT EXISTS git_repo_grants (
+		id              TEXT PRIMARY KEY,
+		agent_ns        TEXT NOT NULL,
+		agent_name      TEXT NOT NULL,
+		service_account TEXT,
+		image_digest    TEXT,
+		agent_spec_hash TEXT,
+		repo_id         TEXT NOT NULL,
+		access          TEXT NOT NULL,
+		approved_by     TEXT,
+		approved_at     TEXT,
+		reason          TEXT,
+		revoked_at      TEXT,
+		revoked_reason  TEXT
+	);`,
+	`CREATE TABLE IF NOT EXISTS git_repo_requests (
+		id           TEXT PRIMARY KEY,
+		status       TEXT NOT NULL,
+		agent_ns     TEXT,
+		agent_name   TEXT,
+		run_id       TEXT,
+		repo_id      TEXT NOT NULL,
+		repo_name    TEXT,
+		access       TEXT NOT NULL,
+		image_digest TEXT,
+		context      TEXT,
+		requested_by TEXT,
+		created_at   TEXT NOT NULL,
+		notified_at  TEXT
+	);`,
 	`CREATE TABLE IF NOT EXISTS channel_configs (
 		channel          TEXT PRIMARY KEY,
 		agent_ns         TEXT NOT NULL,
@@ -167,6 +223,9 @@ var migrations = []string{
 
 	`CREATE INDEX IF NOT EXISTS grants_by_agent  ON grants(agent_ns, agent_name);`,
 	`CREATE INDEX IF NOT EXISTS grants_by_secret ON grants(secret_id);`,
+	`CREATE INDEX IF NOT EXISTS git_repo_grants_by_agent ON git_repo_grants(agent_ns, agent_name);`,
+	`CREATE INDEX IF NOT EXISTS git_repo_grants_by_repo  ON git_repo_grants(repo_id);`,
+	`CREATE INDEX IF NOT EXISTS git_repo_granters_by_repo ON git_repo_granters(repo_id);`,
 	`CREATE INDEX IF NOT EXISTS runs_by_agent    ON runs(agent_ns, agent_name);`,
 	`CREATE INDEX IF NOT EXISTS runs_by_created   ON runs(created_at);`,
 	`CREATE INDEX IF NOT EXISTS runs_by_phase     ON runs(phase);`,
