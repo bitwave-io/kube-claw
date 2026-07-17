@@ -779,12 +779,18 @@ Logs: structured JSON with run/agent/namespace/request/grant IDs. Never secret v
 _(Designed 2026-07-16, post-MVP. Nothing here blocks Phase 7. Implementation is
 tracked as Phases 8a–8e below / TODOS T-8.)_
 
-> **Status (2026-07-16): Phases 8a–8e implemented** — `cmd/claw-supervisor` +
-> `internal/supervisor` (reconciler, poller, watchdog, notifier),
-> `internal/upgrade` (controller-side coordinator), the ControlPlane CRD, chart
-> 0.4.0, the CI manifest-publishing job, and unit + envtest coverage. Not yet
-> live-tested on a cluster (kind/k3d e2e of the rollback path remains); manifest
-> signing is T-9.
+> **Status (2026-07-16): Phases 8a–8e + T-9 implemented and LIVE-TESTED** —
+> `cmd/claw-supervisor` + `internal/supervisor`, `internal/upgrade`, the
+> ControlPlane CRD, chart 0.4.0, ed25519 manifest signing, CI publishing, and
+> unit + envtest coverage. The k3d e2e (`scripts/e2e-selfupdate-k3d.sh`, also a
+> CI job on main/dispatch) passed 24/24: ≤0.3.x chart adoption with PVC/data
+> survival, signed auto-upgrade, tampered-manifest rejection, and broken-release
+> auto-rollback. The e2e caught two real bugs, both fixed: (1) k8s's
+> forced-rollback caveat — a reverted StatefulSet template does not replace a
+> never-Ready pod, so the supervisor deletes stuck pods after a revert; (2)
+> clearing a failed approval regressed desired state to the Helm floor and
+> silently DOWNGRADED past the rollback target — rollback now re-points the
+> approval annotations at the rollback target (`approvedBy: rollback`).
 
 ### 24.1 Problem & shape
 
