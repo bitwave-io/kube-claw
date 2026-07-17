@@ -132,6 +132,11 @@ type DeliverySpec struct {
 type ModelSpec struct {
 	// +optional
 	ProviderRef string `json:"providerRef,omitempty"`
+	// Model overrides the Anthropic model the runner's agent loop uses
+	// (e.g. "claude-sonnet-5" for cheaper routine agents). Empty → the
+	// runner's default (Opus).
+	// +optional
+	Model string `json:"model,omitempty"`
 	// +optional
 	SystemPrompt string `json:"systemPrompt,omitempty"`
 }

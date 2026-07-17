@@ -28,9 +28,9 @@ import (
 
 // Engine launches Jobs for ready runs on an interval.
 type Engine struct {
-	Store         store.Store
-	K8s           client.Client
-	RunnerImage   string
+	Store           store.Store
+	K8s             client.Client
+	RunnerImage     string
 	ControllerURL   string
 	Interval        time.Duration
 	Notifier        *slackrouter.Notifier // posts approval requests to Slack (nil if no bot token)
@@ -229,6 +229,14 @@ func (e *Engine) resolvePrompt(ctx context.Context, agent *clawv1alpha1.Agent) s
 	return ""
 }
 
+// resolveModel returns the agent's model override ("" = runner default).
+func resolveModel(agent *clawv1alpha1.Agent) string {
+	if agent.Spec.Model != nil {
+		return agent.Spec.Model.Model
+	}
+	return ""
+}
+
 // ensureGrantOrRequest reports whether a valid grant exists for the secret; if
 // not, it ensures a Pending SecretRequest (deduped) and returns false. When a
 // NEW request is opened and the run came from Slack, it posts approval buttons.
@@ -296,7 +304,7 @@ func (e *Engine) launch(ctx context.Context, run store.Run, agent *clawv1alpha1.
 	if idle == "" {
 		idle = "5m"
 	}
-	job := workloads.BuildRunJob(run, image, e.ControllerURL, inputText(run.Input), prompt, e.AnthropicSecret, idle)
+	job := workloads.BuildRunJob(run, image, e.ControllerURL, inputText(run.Input), prompt, resolveModel(agent), e.AnthropicSecret, idle)
 	if err := e.K8s.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
 		lg.Error(err, "create job")
 		return

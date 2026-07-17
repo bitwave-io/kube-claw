@@ -310,7 +310,6 @@ func manifestDescriptions() []string {
 	return out
 }
 
-
 func postOutput(controllerURL, runID, content string) error {
 	body, _ := json.Marshal(map[string]string{"kind": "text", "content": content})
 	url := fmt.Sprintf("%s/v1/runs/%s/outputs", controllerURL, runID)
