@@ -313,6 +313,80 @@ func TestReconcileRollback(t *testing.T) {
 	}
 }
 
+// TestRollbackDoesNotDowngradeToFloor: when the rolled-back-to version is
+// NEWER than the Helm floor (install 0.4.0 → upgraded to v0.5.0 → v0.6.0
+// fails), the rollback must hold v0.5.0 — not regress to spec.version. Caught
+// live by the k3d e2e: clearing the approval made desired fall to the floor
+// and the supervisor "upgraded" away from the rollback target.
+func TestRollbackDoesNotDowngradeToFloor(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	cp := testCP(clawv1alpha1.UpdateModePrompt) // helm floor: 0.4.0
+	r, c, _ := harness(t, cp, &now)
+
+	reconcile(t, r) // install at the floor
+	got := getCP(t, c)
+	got.Status.RunningVersion = "v0.4.0"
+	if err := c.Status().Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+
+	// Approved upgrade to v0.5.0 succeeds.
+	got = getCP(t, c)
+	got.Annotations = map[string]string{
+		clawv1alpha1.AnnotationApprovedVersion:         "v0.5.0",
+		clawv1alpha1.AnnotationApprovedControllerImage: "repo/controller@sha256:v050",
+		clawv1alpha1.AnnotationApprovedRunnerImage:     "repo/runner@sha256:v050",
+	}
+	if err := c.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r)
+	got = getCP(t, c)
+	got.Status.RunningVersion = "v0.5.0"
+	if err := c.Status().Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r) // confirm → Idle
+
+	// Approved upgrade to v0.6.0 fails.
+	got = getCP(t, c)
+	got.Annotations[clawv1alpha1.AnnotationApprovedVersion] = "v0.6.0"
+	got.Annotations[clawv1alpha1.AnnotationApprovedControllerImage] = "repo/controller@sha256:v060"
+	got.Annotations[clawv1alpha1.AnnotationApprovedRunnerImage] = "repo/runner@sha256:v060"
+	if err := c.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r)
+	now = now.Add(11 * time.Minute)
+	reconcile(t, r) // deadline → rollback
+
+	got = getCP(t, c)
+	if got.Annotations[clawv1alpha1.AnnotationApprovedVersion] != "v0.5.0" ||
+		got.Annotations[clawv1alpha1.AnnotationApprovedBy] != "rollback" {
+		t.Fatalf("approval after rollback = %v, want re-pointed at v0.5.0 by 'rollback'", got.Annotations)
+	}
+	if img := currentImage(getSTS(t, c)); !strings.Contains(img, "sha256:v050") {
+		t.Fatalf("rolled-back image = %q, want the v0.5.0 digest", img)
+	}
+
+	// Old version confirms; further reconciles must HOLD v0.5.0, not "upgrade"
+	// back down to the 0.4.0 floor.
+	got.Status.RunningVersion = "v0.5.0"
+	if err := c.Status().Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r)
+	reconcile(t, r)
+	got = getCP(t, c)
+	if got.Status.Phase != clawv1alpha1.PhaseIdle {
+		t.Fatalf("phase = %q, want Idle", got.Status.Phase)
+	}
+	if img := currentImage(getSTS(t, c)); !strings.Contains(img, "sha256:v050") {
+		t.Fatalf("post-rollback image = %q — downgraded to the floor!", img)
+	}
+}
+
 // TestReconcileMigrationHold: a migration release that misses the deadline
 // holds Degraded (no rollback) and pages the admin.
 func TestReconcileMigrationHold(t *testing.T) {

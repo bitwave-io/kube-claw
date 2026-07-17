@@ -101,10 +101,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		lg.Info("holding rolled-back version", "held", des.Version)
 	default:
 		// Images match; keep the rest of the pod template converged (resource
-		// or config changes roll the pod at the same version).
+		// or config changes roll the pod at the same version). Compare ONLY the
+		// fields this reconciler owns — the apiserver defaults the rest (probe
+		// timings, port protocols, termination paths), so a whole-container
+		// DeepEqual never matches and would rewrite the object every reconcile.
 		desired := BuildStatefulSet(&cp, des)
-		if !apiequality.Semantic.DeepEqual(sts.Spec.Template.Spec.Containers, desired.Spec.Template.Spec.Containers) ||
-			!apiequality.Semantic.DeepEqual(sts.Spec.Replicas, desired.Spec.Replicas) {
+		if templateDrifted(&sts, desired) {
 			sts.Spec.Template = desired.Spec.Template
 			sts.Spec.Replicas = desired.Spec.Replicas
 			if err := r.Update(ctx, &sts); err != nil {
@@ -276,15 +278,31 @@ func (r *Reconciler) failUpdate(ctx context.Context, cp *clawv1alpha1.ControlPla
 	// must be deleted so the controller recreates it at the reverted revision.
 	r.deleteStuckPods(ctx, cp.Namespace)
 
-	// A failed approval must not re-apply on the next reconcile: clear it.
-	if cp.Annotations[clawv1alpha1.AnnotationApprovedVersion] == target {
+	// Re-point the approval at the ROLLBACK TARGET rather than merely clearing
+	// it: with the annotations gone, desired state would regress to the Helm
+	// floor (spec.version) and immediately "upgrade" away from the version we
+	// just rolled back to — a silent downgrade (caught by the k3d e2e). The
+	// failed release itself stays blocked via LastRollback (the held guard),
+	// and version.Newer keeps a stale rewrite from ever outranking the floor.
+	if cp.Annotations == nil {
+		cp.Annotations = map[string]string{}
+	}
+	if version.Newer(cp.Status.PreviousVersion, cp.Spec.Version) &&
+		cp.Status.PreviousControllerImage != "" && cp.Status.PreviousRunnerImage != "" {
+		cp.Annotations[clawv1alpha1.AnnotationApprovedVersion] = cp.Status.PreviousVersion
+		cp.Annotations[clawv1alpha1.AnnotationApprovedControllerImage] = cp.Status.PreviousControllerImage
+		cp.Annotations[clawv1alpha1.AnnotationApprovedRunnerImage] = cp.Status.PreviousRunnerImage
+		cp.Annotations[clawv1alpha1.AnnotationApprovedBy] = "rollback"
+	} else {
+		// The floor already serves the rollback target (or we have no usable
+		// previous refs) — the tag path covers it.
 		delete(cp.Annotations, clawv1alpha1.AnnotationApprovedVersion)
 		delete(cp.Annotations, clawv1alpha1.AnnotationApprovedControllerImage)
 		delete(cp.Annotations, clawv1alpha1.AnnotationApprovedRunnerImage)
 		delete(cp.Annotations, clawv1alpha1.AnnotationApprovedBy)
-		if err := r.Update(ctx, cp); err != nil {
-			return ctrl.Result{}, err
-		}
+	}
+	if err := r.Update(ctx, cp); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	lg.Info("rolling back", "from", target, "to", cp.Status.PreviousVersion)
@@ -292,6 +310,44 @@ func (r *Reconciler) failUpdate(ctx context.Context, cp *clawv1alpha1.ControlPla
 		":warning: kube-claw upgrade to *%s* did not confirm startup — rolling back to *%s*. I won't retry this release.",
 		target, orUnknown(cp.Status.PreviousVersion)))
 	return ctrl.Result{RequeueAfter: watchdogPoll}, nil
+}
+
+// templateDrifted compares only the supervisor-owned template fields against
+// the live object: replicas, and the controller container's image, args, env,
+// resources, and port numbers. Server-defaulted fields are ignored on purpose.
+func templateDrifted(current, desired *appsv1.StatefulSet) bool {
+	cur := containerByName(current, "controller")
+	des := containerByName(desired, "controller")
+	if cur == nil || des == nil {
+		return true
+	}
+	if !apiequality.Semantic.DeepEqual(current.Spec.Replicas, desired.Spec.Replicas) {
+		return true
+	}
+	if cur.Image != des.Image ||
+		!apiequality.Semantic.DeepEqual(cur.Args, des.Args) ||
+		!apiequality.Semantic.DeepEqual(cur.Env, des.Env) ||
+		!apiequality.Semantic.DeepEqual(cur.Resources, des.Resources) {
+		return true
+	}
+	if len(cur.Ports) != len(des.Ports) {
+		return true
+	}
+	for i := range des.Ports {
+		if cur.Ports[i].Name != des.Ports[i].Name || cur.Ports[i].ContainerPort != des.Ports[i].ContainerPort {
+			return true
+		}
+	}
+	return false
+}
+
+func containerByName(sts *appsv1.StatefulSet, name string) *corev1.Container {
+	for i := range sts.Spec.Template.Spec.Containers {
+		if sts.Spec.Template.Spec.Containers[i].Name == name {
+			return &sts.Spec.Template.Spec.Containers[i]
+		}
+	}
+	return nil
 }
 
 // deleteStuckPods best-effort deletes non-Ready controller pods after a

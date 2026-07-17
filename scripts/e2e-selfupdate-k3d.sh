@@ -12,7 +12,8 @@
 #   D  publish a TAMPERED manifest → rejected (signature fail-closed), the
 #      available version does not move
 #   E  publish a signed manifest pointing at a NONEXISTENT image → apply,
-#      confirm deadline passes → auto-rollback to v0.9.1, approval cleared
+#      confirm deadline passes → auto-rollback to v0.9.1 (stuck pod deleted,
+#      approval re-pointed at the rollback target — no downgrade to the floor)
 #
 # Usage: ./scripts/e2e-selfupdate-k3d.sh   (takes ~15-25 min incl. image builds)
 #   SKIP_BUILD=1  reuse previously built/imported images
@@ -56,12 +57,20 @@ cp_field() { cp_json | python3 -c "import sys,json;d=json.load(sys.stdin);print(
 sts_image() { kubectl -n "$NS" get statefulset claw-controller -o jsonpath='{.spec.template.spec.containers[0].image}'; }
 
 # claw_api METHOD PATH [JSON_BODY] — controller API via an in-cluster curl pod.
+# Retries inside the pod: k3s's kube-router NetworkPolicy enforcement takes a
+# few seconds to add a NEW pod's IP to its allow-ipsets, so the first requests
+# from a fresh pod bounce off the controller netpol with connection-refused.
 claw_api() {
   local method="$1" path="$2" body="${3:-}"
-  local args=(-sS -X "$method" "http://claw-controller.${NS}.svc:8443${path}")
-  [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" -d "$body")
+  local curl_cmd="curl -sS -m 5 -X $method http://claw-controller.${NS}.svc:8443${path}"
+  [[ -n "$body" ]] && curl_cmd="$curl_cmd -H 'Content-Type: application/json' -d '$body'"
   kubectl -n "$NS" run "claw-e2e-curl-$RANDOM" --rm -i --restart=Never --quiet \
-    --image=curlimages/curl:8.11.1 --command -- curl "${args[@]}"
+    --image=curlimages/curl:8.11.1 --command -- sh -c "
+      for i in \$(seq 1 12); do
+        if out=\$($curl_cmd 2>/dev/null); then echo \"\$out\"; exit 0; fi
+        sleep 2
+      done
+      echo CLAW_API_RETRIES_EXHAUSTED; exit 1"
 }
 
 publish_manifest() { # version controller_image runner_image sign(yes/no)
@@ -206,9 +215,16 @@ wait_for "rollback confirmed (runningVersion=v0.9.1, phase Idle)" 300 \
 [ "$(kubectl -n "$NS" get controlplane claw -o jsonpath='{.status.lastRollback.from}')" = v0.9.2 ] \
   || fail "lastRollback.from records v0.9.2"
 ok "lastRollback.from records v0.9.2"
-[ -z "$(kubectl -n "$NS" get controlplane claw -o jsonpath='{.metadata.annotations.claw\.run/approved-version}')" ] \
-  || fail "failed approval annotations cleared"
-ok "failed approval annotations cleared"
+[ "$(kubectl -n "$NS" get controlplane claw -o jsonpath='{.metadata.annotations.claw\.run/approved-version}')" = v0.9.1 ] \
+  || fail "approval re-pointed at the rollback target v0.9.1 (no downgrade to the floor)"
+[ "$(kubectl -n "$NS" get controlplane claw -o jsonpath='{.metadata.annotations.claw\.run/approved-by}')" = rollback ] \
+  || fail "approval re-pointed by 'rollback'"
+ok "approval re-pointed at v0.9.1 by rollback (no downgrade to the floor)"
+# Give the reconciler time to do the WRONG thing if it were going to (the bug
+# this guards: post-rollback downgrade to spec.version).
+sleep 45
+[ "$(sts_image)" = kube-claw-controller:v0.9.1 ] || fail "held v0.9.1 after rollback (no floor downgrade)"
+ok "held v0.9.1 after rollback (no floor downgrade)"
 claw_api GET /v1/settings | grep -q U_E2E_MARKER || fail "store marker survived the rollback"
 ok "store marker survived the rollback"
 
