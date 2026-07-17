@@ -699,7 +699,7 @@ func (s *agentSession) callModel(ctx context.Context, params anthropic.MessageNe
 	backoffs := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		resp, err := s.client.Messages.New(ctx, params)
+		resp, err := s.streamModel(ctx, params)
 		if err == nil {
 			return resp, nil
 		}
@@ -728,6 +728,25 @@ func (s *agentSession) callModel(ctx context.Context, params anthropic.MessageNe
 		case <-time.After(wait):
 		}
 	}
+}
+
+// streamModel makes one model call over a stream and accumulates the events
+// into a complete Message (text, tool_use, and thinking blocks included).
+// Streaming is REQUIRED at our max_tokens: the API rejects non-streaming
+// requests that could outlive its 10-minute generation cap ("streaming is
+// required for operations that may take longer than 10 minutes").
+func (s *agentSession) streamModel(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	stream := s.client.Messages.NewStreaming(ctx, params)
+	msg := anthropic.Message{}
+	for stream.Next() {
+		if err := msg.Accumulate(stream.Current()); err != nil {
+			return nil, err
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	return &msg, nil
 }
 
 // retryableStatus reports whether an API error status is worth retrying
