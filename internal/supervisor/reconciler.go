@@ -116,7 +116,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	return r.watchdog(ctx, &cp, des)
+	return r.watchdog(ctx, &cp, &sts, des)
 }
 
 // beginUpdate records the rollback point and applies the new images
@@ -143,8 +143,11 @@ func (r *Reconciler) beginUpdate(ctx context.Context, cp *clawv1alpha1.ControlPl
 	cp.Status.UpdateContainsMigration = des.FromApproval &&
 		version.Same(des.Version, cp.Status.AvailableVersion) && cp.Status.AvailableContainsMigration
 	cp.Status.Phase = clawv1alpha1.PhaseUpdating
-	cp.Status.RunningControllerImage = des.ControllerImage
-	cp.Status.RunningRunnerImage = des.RunnerImage
+	// Running* is stamped only on CONFIRM (watchdog), never here: this status
+	// update lands BEFORE the StatefulSet one, and if that update conflicts the
+	// retry would read the target back out of Running* and record it as the
+	// rollback point — rollback then "reverts" to the broken release (caught by
+	// the k3d e2e's bad-release scenario).
 	if err := r.Status().Update(ctx, cp); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -172,7 +175,7 @@ func sameVersion(a, b string) bool {
 // controller writing status.runningVersion (startup-confirmed, §24.5), not
 // pod-Ready; the confirm deadline triggers rollback (or Degraded-hold for
 // migration releases).
-func (r *Reconciler) watchdog(ctx context.Context, cp *clawv1alpha1.ControlPlane, des Desired) (ctrl.Result, error) {
+func (r *Reconciler) watchdog(ctx context.Context, cp *clawv1alpha1.ControlPlane, sts *appsv1.StatefulSet, des Desired) (ctrl.Result, error) {
 	lg := logf.FromContext(ctx)
 
 	switch cp.Status.Phase {
@@ -182,6 +185,11 @@ func (r *Reconciler) watchdog(ctx context.Context, cp *clawv1alpha1.ControlPlane
 			cp.Status.UpdateTarget = ""
 			cp.Status.UpdateStartedAt = nil
 			cp.Status.UpdateContainsMigration = false
+			// The confirmed images, read from the live StatefulSet — the only
+			// place Running* is stamped, so the next update's rollback point is
+			// always a CONFIRMED release.
+			cp.Status.RunningControllerImage = currentImage(sts)
+			cp.Status.RunningRunnerImage = currentRunnerImage(sts)
 			lg.Info("update confirmed", "version", cp.Status.RunningVersion)
 			return ctrl.Result{}, r.Status().Update(ctx, cp)
 		}
@@ -191,7 +199,23 @@ func (r *Reconciler) watchdog(ctx context.Context, cp *clawv1alpha1.ControlPlane
 		return r.failUpdate(ctx, cp)
 
 	case clawv1alpha1.PhaseRollingBack:
-		if sameVersion(cp.Status.RunningVersion, cp.Status.PreviousVersion) {
+		// Converge the revert first: if failUpdate's StatefulSet update was lost
+		// (conflict, crash), nothing else re-runs it — without this the phase
+		// would sit on the broken image until the deadline declared Degraded.
+		if cp.Status.PreviousControllerImage != "" && currentImage(sts) != cp.Status.PreviousControllerImage {
+			setImages(sts, cp.Status.PreviousControllerImage, cp.Status.PreviousRunnerImage)
+			if err := r.Update(ctx, sts); err != nil {
+				return ctrl.Result{}, err
+			}
+			r.deleteStuckPods(ctx, cp.Namespace)
+			lg.Info("re-applied rollback revert", "image", cp.Status.PreviousControllerImage)
+			return ctrl.Result{RequeueAfter: watchdogPoll}, nil
+		}
+		// runningVersion is a stale signal here — a never-confirmed update leaves
+		// it AT the rollback target, so the version match is vacuous the instant
+		// the rollback starts. A Ready controller pod is the fresh evidence that
+		// the reverted release actually came back.
+		if sameVersion(cp.Status.RunningVersion, cp.Status.PreviousVersion) && r.controllerPodReady(ctx, cp.Namespace) {
 			cp.Status.Phase = clawv1alpha1.PhaseIdle
 			cp.Status.UpdateTarget = ""
 			cp.Status.UpdateStartedAt = nil
@@ -371,6 +395,22 @@ func (r *Reconciler) deleteStuckPods(ctx context.Context, namespace string) {
 			lg.Info("deleted stuck controller pod so the revert can proceed", "pod", p.Name)
 		}
 	}
+}
+
+// controllerPodReady reports whether any controller pod is Ready — the
+// rollback-confirmed signal (see the RollingBack watchdog note).
+func (r *Reconciler) controllerPodReady(ctx context.Context, namespace string) bool {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(namespace),
+		client.MatchingLabels{"app.kubernetes.io/name": appLabel}); err != nil {
+		return false
+	}
+	for i := range pods.Items {
+		if podReady(&pods.Items[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 func podReady(p *corev1.Pod) bool {

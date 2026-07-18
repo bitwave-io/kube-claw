@@ -8,13 +8,16 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 )
@@ -295,9 +298,18 @@ func TestReconcileRollback(t *testing.T) {
 		t.Fatalf("expected a rollback notification, got %v", n.msgs)
 	}
 
-	// Old version confirms → Idle, and the failed version stays held (no
-	// re-apply even if the approval were re-added by hand — the rollback record
-	// blocks it).
+	// Old version comes back (Ready pod — the rollback-confirmed signal;
+	// runningVersion alone is stale, it never left v0.4.0) → Idle, and the
+	// failed version stays held (no re-apply even if the approval were re-added
+	// by hand — the rollback record blocks it).
+	back := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "claw-controller-0", Namespace: "claw-system",
+			Labels: map[string]string{"app.kubernetes.io/name": "claw-controller"}},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	if err := c.Create(ctx, back); err != nil {
+		t.Fatal(err)
+	}
 	got.Status.RunningVersion = "v0.4.0"
 	if err := c.Status().Update(ctx, got); err != nil {
 		t.Fatal(err)
@@ -370,8 +382,16 @@ func TestRollbackDoesNotDowngradeToFloor(t *testing.T) {
 		t.Fatalf("rolled-back image = %q, want the v0.5.0 digest", img)
 	}
 
-	// Old version confirms; further reconciles must HOLD v0.5.0, not "upgrade"
-	// back down to the 0.4.0 floor.
+	// Old version comes back (Ready pod = rollback-confirmed signal); further
+	// reconciles must HOLD v0.5.0, not "upgrade" back down to the 0.4.0 floor.
+	ready := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "claw-controller-0", Namespace: "claw-system",
+			Labels: map[string]string{"app.kubernetes.io/name": "claw-controller"}},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	if err := c.Create(ctx, ready); err != nil {
+		t.Fatal(err)
+	}
 	got.Status.RunningVersion = "v0.5.0"
 	if err := c.Status().Update(ctx, got); err != nil {
 		t.Fatal(err)
@@ -384,6 +404,96 @@ func TestRollbackDoesNotDowngradeToFloor(t *testing.T) {
 	}
 	if img := currentImage(getSTS(t, c)); !strings.Contains(img, "sha256:v050") {
 		t.Fatalf("post-rollback image = %q — downgraded to the floor!", img)
+	}
+}
+
+// TestBeginUpdateConflictKeepsRollbackPoint reproduces the k3d e2e failure
+// from the first CI run: the apply's StatefulSet update hits an optimistic-
+// concurrency conflict, the retry re-enters beginUpdate, and the recorded
+// rollback point must still be the last CONFIRMED release — not the target
+// read back out of a prematurely-stamped status.running*Image. Rollback must
+// then actually revert the image, and must not confirm while no pod is Ready.
+func TestBeginUpdateConflictKeepsRollbackPoint(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	cp := testCP(clawv1alpha1.UpdateModePrompt)
+
+	// Fail the FIRST StatefulSet Update after install with a conflict.
+	stsUpdates := 0
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(cp).
+		WithStatusSubresource(&clawv1alpha1.ControlPlane{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if _, ok := obj.(*appsv1.StatefulSet); ok {
+					stsUpdates++
+					if stsUpdates == 1 {
+						return apierrors.NewConflict(
+							schema.GroupResource{Group: "apps", Resource: "statefulsets"},
+							StatefulSetName, nil)
+					}
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	n := &recordingNotifier{}
+	r := &Reconciler{Client: c, Notify: n, Now: func() time.Time { return now }}
+
+	reconcile(t, r) // install
+	got := getCP(t, c)
+	got.Status.RunningVersion = "v0.4.0"
+	if err := c.Status().Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+
+	// Approve a broken release; the first apply attempt conflicts.
+	got = getCP(t, c)
+	got.Annotations = map[string]string{
+		clawv1alpha1.AnnotationApprovedVersion:         "v0.5.0",
+		clawv1alpha1.AnnotationApprovedControllerImage: "docker.io/bitwavecode/kube-claw-controller@sha256:bad",
+		clawv1alpha1.AnnotationApprovedRunnerImage:     "docker.io/bitwavecode/kube-claw-runner@sha256:bad",
+	}
+	if err := c.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "claw-system", Name: "claw"}}); err == nil {
+		t.Fatal("first apply must surface the injected conflict")
+	}
+	reconcile(t, r) // retry lands the update
+
+	got = getCP(t, c)
+	if got.Status.PreviousControllerImage != "docker.io/bitwavecode/kube-claw-controller:0.4.0" {
+		t.Fatalf("rollback point corrupted by the retry: previous image = %q", got.Status.PreviousControllerImage)
+	}
+
+	// Deadline passes without confirmation → rollback must land the REAL
+	// previous image on the StatefulSet.
+	now = now.Add(11 * time.Minute)
+	reconcile(t, r)
+	if img := currentImage(getSTS(t, c)); img != "docker.io/bitwavecode/kube-claw-controller:0.4.0" {
+		t.Fatalf("rolled-back image = %q, want the confirmed previous", img)
+	}
+
+	// No Ready pod yet → the rollback must NOT report confirmed/Idle.
+	reconcile(t, r)
+	if got = getCP(t, c); got.Status.Phase != clawv1alpha1.PhaseRollingBack {
+		t.Fatalf("phase = %q, want RollingBack while no pod is Ready", got.Status.Phase)
+	}
+
+	// Pod comes back Ready → confirmed.
+	ready := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "claw-controller-0", Namespace: "claw-system",
+			Labels: map[string]string{"app.kubernetes.io/name": "claw-controller"}},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	if err := c.Create(ctx, ready); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r)
+	if got = getCP(t, c); got.Status.Phase != clawv1alpha1.PhaseIdle {
+		t.Fatalf("phase = %q, want Idle after the pod is Ready", got.Status.Phase)
 	}
 }
 
