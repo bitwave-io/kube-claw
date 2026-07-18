@@ -36,6 +36,10 @@ type Reconciler struct {
 	Notify Notifier
 	// Now is injectable for watchdog tests; defaults to time.Now.
 	Now func() time.Time
+	// PokePoller wakes the release poller immediately (set to Poller.Poke) —
+	// called when the check-requested annotation appears, so an on-demand
+	// check doesn't wait for the minute tick.
+	PokePoller func()
 }
 
 func (r *Reconciler) now() time.Time {
@@ -58,6 +62,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var cp clawv1alpha1.ControlPlane
 	if err := r.Get(ctx, req.NamespacedName, &cp); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	// An on-demand release check was requested (annotation written by the
+	// controller): wake the poller now — it consumes the annotation.
+	if cp.Annotations[clawv1alpha1.AnnotationCheckRequested] != "" && r.PokePoller != nil {
+		r.PokePoller()
 	}
 	des := DesiredState(&cp)
 

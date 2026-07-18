@@ -156,6 +156,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/version", s.getVersion)
 	mux.HandleFunc("GET /v1/upgrade/status", s.upgradeStatus)
 	mux.HandleFunc("POST /v1/upgrade/approve", s.upgradeApprove)
+	mux.HandleFunc("POST /v1/upgrade/check", s.upgradeCheck)
 	mux.HandleFunc("GET /v1/settings", s.listSettings)
 	mux.HandleFunc("PUT /v1/settings/{key}", s.setSetting)
 	mux.HandleFunc("GET /v1/schedules", s.listSchedules)
@@ -187,6 +188,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/channels", s.channelsPage)
 	mux.HandleFunc("GET /ui/settings", s.settingsPage)
 	mux.HandleFunc("POST /ui/settings", s.uiSetSettings)
+	mux.HandleFunc("POST /ui/settings/check-upgrades", s.uiCheckUpgrades)
 	return s.withAdminAuth(mux)
 }
 

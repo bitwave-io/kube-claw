@@ -46,6 +46,10 @@ func newUpgradeCmd() *cobra.Command {
 			RunE: func(_ *cobra.Command, args []string) error {
 				return apiJSON(http.MethodPost, "/v1/upgrade/approve", map[string]any{"version": args[0]}, nil)
 			}},
+		&cobra.Command{Use: "check", Short: "Request an immediate release check (results surface via status/Slack within a minute)",
+			RunE: func(_ *cobra.Command, _ []string) error {
+				return apiJSON(http.MethodPost, "/v1/upgrade/check", map[string]any{}, nil)
+			}},
 	)
 	return c
 }

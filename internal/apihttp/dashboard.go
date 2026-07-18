@@ -11,6 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/store"
@@ -531,8 +532,23 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 <label>Management channel <input name=mgmtChannel value="{{.D.Mgmt}}" placeholder="C0123456789">{{if .D.MgmtName}} <span class=mut>= {{.D.MgmtName}}</span>{{end}}</label>
 <button type=submit>Save</button>
 </form>
-<p class=mut>The management channel gets release announcements and upgrade lifecycle events (available, applied, rolled back). The bot must be a member of it. Also settable by DMing the bot <code>announce releases in #channel</code>.</p>`
+<p class=mut>The management channel gets release announcements and upgrade lifecycle events (available, applied, rolled back). The bot must be a member of it. Also settable by DMing the bot <code>announce releases in #channel</code>.</p>
+<h2>Releases</h2>
+<form method=post action=/ui/settings/check-upgrades>
+<button type=submit>Check for updates now</button>
+</form>
+<p class=mut>Requests an immediate release check from the supervisor (instead of waiting for the next scheduled poll). New releases surface as usual: a prompt to the upgrade admin, an announcement in the management channel. Also: DM the bot <code>check for updates</code> or run <code>claw upgrade check</code>.</p>`
 	s.renderDash(w, "settings", "Settings", body, data)
+}
+
+// uiCheckUpgrades requests an immediate release check (settings-page button).
+func (s *Server) uiCheckUpgrades(w http.ResponseWriter, r *http.Request) {
+	if s.Upgrades != nil {
+		if err := s.Upgrades.CheckNow(r.Context()); err != nil {
+			logf.Log.WithName("apihttp").Error(err, "ui check-upgrades")
+		}
+	}
+	http.Redirect(w, r, "/ui/settings", http.StatusSeeOther)
 }
 
 // uiSetSettings applies the settings form (upgrade admin + management channel).

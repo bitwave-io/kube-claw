@@ -331,3 +331,16 @@ func TestApprove(t *testing.T) {
 		t.Fatalf("requires-helm approve err = %v", err)
 	}
 }
+
+// TestCheckNow stamps the check-requested annotation the supervisor consumes.
+func TestCheckNow(t *testing.T) {
+	ctx := context.Background()
+	cp := baseCP()
+	coord, c, _ := testCoordinator(t, cp)
+	if err := coord.CheckNow(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := getCP(t, c); got.Annotations[clawv1alpha1.AnnotationCheckRequested] == "" {
+		t.Fatal("check-requested annotation not written")
+	}
+}

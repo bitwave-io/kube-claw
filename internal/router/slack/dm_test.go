@@ -177,3 +177,28 @@ func TestConversationalDM(t *testing.T) {
 		t.Fatalf("run without any agent = %q", id)
 	}
 }
+
+// DM "check for updates" requests an immediate release check via the upgrade
+// actor — deterministically, even on conversational installs.
+func TestCheckForUpdatesDM(t *testing.T) {
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "claw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeUpgrades{}
+	r := &Router{Store: st, Upgrades: fake, Classifier: NewClassifier("test-key")}
+
+	if reply := r.HandleDM(ctx, "U1", "can you check for updates?"); !strings.Contains(reply, "checking") || fake.checks != 1 {
+		t.Fatalf("check command: reply=%q checks=%d", reply, fake.checks)
+	}
+	// Without the actor, a clear message instead of a run.
+	bare := &Router{Store: st, Classifier: NewClassifier("test-key")}
+	if reply := bare.HandleDM(ctx, "U1", "check for a new release please"); !strings.Contains(reply, "isn't enabled") {
+		t.Fatalf("actor-less reply = %q", reply)
+	}
+}

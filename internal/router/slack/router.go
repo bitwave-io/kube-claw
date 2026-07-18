@@ -361,6 +361,16 @@ func (r *Router) handleAnnounceCommand(ctx context.Context, userID, text string)
 // LLM-less installs and never depend on a model's mood.
 func (r *Router) HandleDM(ctx context.Context, userID, text string) string {
 	low := strings.ToLower(text)
+	if strings.Contains(low, "check") &&
+		(strings.Contains(low, "update") || strings.Contains(low, "upgrade") || strings.Contains(low, "release")) {
+		if r.Upgrades == nil {
+			return "Self-update isn't enabled on this install."
+		}
+		if err := r.Upgrades.CheckNow(ctx); err != nil {
+			return "couldn't request the check: " + err.Error()
+		}
+		return "On it — checking for a new release now. If something new turns up, the upgrade admin gets a prompt (and the management channel an announcement) within a minute."
+	}
 	if strings.Contains(low, "announc") && strings.Contains(low, "release") {
 		return r.handleAnnounceCommand(ctx, userID, text)
 	}
@@ -581,6 +591,8 @@ type UpgradeActor interface {
 	Skip(ctx context.Context, version, byUser string) error
 	// Later defers the decision: the prompt re-arms on the next version check.
 	Later(ctx context.Context, version string) error
+	// CheckNow requests an immediate release check from the supervisor.
+	CheckNow(ctx context.Context) error
 }
 
 // UpgradeActionValue encodes an upgrade-prompt button: "upgrade|<action>|<version>".

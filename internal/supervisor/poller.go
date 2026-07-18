@@ -31,6 +31,21 @@ type Poller struct {
 	Fetch func(ctx context.Context, url string) (Manifest, error)
 	// Now is injectable for tests; defaults to time.Now.
 	Now func() time.Time
+	// Kick wakes the poll loop immediately (an on-demand release check — the
+	// reconciler pokes it when it sees the check-requested annotation). The
+	// minute tick is the fallback if a poke is ever missed.
+	Kick chan struct{}
+}
+
+// Poke requests an immediate poll (non-blocking; coalesces).
+func (p *Poller) Poke() {
+	if p.Kick == nil {
+		return
+	}
+	select {
+	case p.Kick <- struct{}{}:
+	default:
+	}
 }
 
 // NeedLeaderElection lets the poller run on the (single) supervisor replica.
@@ -44,11 +59,17 @@ func (p *Poller) Start(ctx context.Context) error {
 	// One immediate pass so a fresh install learns about releases without
 	// waiting a full interval.
 	p.pollAll(ctx)
+	kick := p.Kick
+	if kick == nil {
+		kick = make(chan struct{}) // never fires
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-tick.C:
+			p.pollAll(ctx)
+		case <-kick:
 			p.pollAll(ctx)
 		}
 	}
@@ -63,8 +84,14 @@ func (p *Poller) pollAll(ctx context.Context) {
 	}
 	for i := range list.Items {
 		cp := &list.Items[i]
-		if !p.due(cp) {
+		requested := cp.Annotations[clawv1alpha1.AnnotationCheckRequested] != ""
+		if !requested && !p.due(cp) {
 			continue
+		}
+		if requested {
+			// Consume the request BEFORE polling: a failing fetch must not
+			// leave the annotation re-triggering every minute forever.
+			p.clearCheckRequested(ctx, cp)
 		}
 		if err := p.pollOne(ctx, cp); err != nil {
 			lg.Error(err, "poll release manifest", "controlplane", cp.Name)
@@ -72,11 +99,20 @@ func (p *Poller) pollAll(ctx context.Context) {
 	}
 }
 
+// clearCheckRequested best-effort removes the on-demand-check annotation.
+func (p *Poller) clearCheckRequested(ctx context.Context, cp *clawv1alpha1.ControlPlane) {
+	fresh := cp.DeepCopy()
+	delete(fresh.Annotations, clawv1alpha1.AnnotationCheckRequested)
+	if err := p.Update(ctx, fresh); err != nil {
+		logf.Log.WithName("release-poller").Error(err, "clear check-requested annotation", "controlplane", cp.Name)
+	}
+}
+
 // due reports whether this CR's checkInterval has elapsed since LastCheckTime.
 func (p *Poller) due(cp *clawv1alpha1.ControlPlane) bool {
 	interval := p.DefaultInterval
 	if interval <= 0 {
-		interval = 6 * time.Hour
+		interval = time.Hour
 	}
 	if d, err := time.ParseDuration(cp.Spec.Updates.CheckInterval); err == nil && d > 0 {
 		interval = d

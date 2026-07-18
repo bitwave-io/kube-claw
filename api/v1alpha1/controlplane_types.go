@@ -59,6 +59,10 @@ const (
 	// AnnotationMgmtChannel mirrors the store's management-channel setting so
 	// the supervisor can post failures there too.
 	AnnotationMgmtChannel = "claw.run/management-channel"
+	// AnnotationCheckRequested asks the supervisor's poller for an immediate
+	// release check (value: request timestamp; the poller clears it when
+	// consumed). Written by the controller on "check for updates" requests.
+	AnnotationCheckRequested = "claw.run/check-requested"
 )
 
 // ControlPlaneSpec is Helm-owned policy: which release stream to follow, who
@@ -113,7 +117,7 @@ type UpdatesSpec struct {
 	ManifestURL string `json:"manifestURL,omitempty"`
 
 	// CheckInterval is how often the supervisor polls the release manifest.
-	// +kubebuilder:default="6h"
+	// +kubebuilder:default="1h"
 	// +optional
 	CheckInterval string `json:"checkInterval,omitempty"`
 
