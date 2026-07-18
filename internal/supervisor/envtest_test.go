@@ -29,7 +29,7 @@ func TestSupervisor_Envtest(t *testing.T) {
 		t.Skip("KUBEBUILDER_ASSETS not set; run via setup-envtest")
 	}
 	env := &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "charts", "crds")},
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "charts", "claw", "crds")},
 		ErrorIfCRDPathMissing: true,
 	}
 	cfg, err := env.Start()
