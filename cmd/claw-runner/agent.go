@@ -43,6 +43,12 @@ type agentSession struct {
 	servedModel string
 	modelTagged bool
 
+	// turnInTokens/turnOutTokens accumulate usage across the turn's model calls
+	// (input includes cache reads and writes); the reply footer reads them out.
+	// Reset at the start of each turn.
+	turnInTokens  int64
+	turnOutTokens int64
+
 	// claimTurn (set for warm Slack sessions) claims the next queued follow-up
 	// run. While a turn runs, watchInterrupts is the only claimer: it lets the
 	// turn absorb messages that arrive WHILE it runs instead of answering them
@@ -441,6 +447,7 @@ func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
 func (s *agentSession) turn(ctx context.Context, userText string) (string, error) {
 	s.compactHistory()
 	s.messages = append(s.messages, anthropic.NewUserMessage(anthropic.NewTextBlock(userText)))
+	s.turnInTokens, s.turnOutTokens = 0, 0
 	adaptive := anthropic.ThinkingConfigAdaptiveParam{}
 
 	// Everything in this turn — model calls, bash, approval waits, heartbeat —
@@ -496,6 +503,8 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 			return "", err
 		}
 		s.servedModel = string(resp.Model)
+		s.turnInTokens += resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
+		s.turnOutTokens += resp.Usage.OutputTokens
 		s.messages = append(s.messages, resp.ToParam())
 
 		var turn []string
@@ -610,16 +619,20 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 	if strings.TrimSpace(final[len(final)-1]) == noReply {
 		return noReply, nil
 	}
-	// Tag the pod's first reply with the agent picked to service this thread and
-	// the model actually served (per the API response, not the requested
-	// constant). Re-appearing mid-thread = pod restart.
+	// Tag every reply with the turn's token usage. The pod's first reply also
+	// carries the agent picked to service this thread and the model actually
+	// served (per the API response, not the requested constant) — those
+	// re-appearing mid-thread = pod restart.
+	usage := fmt.Sprintf("tokens: %s in · %s out", fmtTokens(s.turnInTokens), fmtTokens(s.turnOutTokens))
 	if !s.modelTagged && s.servedModel != "" {
 		if s.agentName != "" {
-			answer += fmt.Sprintf("\n\n_agent: %s · model: %s_", s.agentName, s.servedModel)
+			answer += fmt.Sprintf("\n\n_agent: %s · model: %s · %s_", s.agentName, s.servedModel, usage)
 		} else {
-			answer += fmt.Sprintf("\n\n_model: %s_", s.servedModel)
+			answer += fmt.Sprintf("\n\n_model: %s · %s_", s.servedModel, usage)
 		}
 		s.modelTagged = true
+	} else {
+		answer += fmt.Sprintf("\n\n_%s_", usage)
 	}
 	return answer, nil
 }
@@ -747,6 +760,18 @@ func (s *agentSession) streamModel(ctx context.Context, params anthropic.Message
 		return nil, err
 	}
 	return &msg, nil
+}
+
+// fmtTokens renders a token count compactly for the reply footer (837, 45.2k, 1.3M).
+func fmtTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1_000_000), ".0") + "M"
+	case n >= 1_000:
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1_000), ".0") + "k"
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // retryableStatus reports whether an API error status is worth retrying
