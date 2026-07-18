@@ -43,7 +43,10 @@ func DefaultManifestURL(channel string) string {
 	if channel == "" {
 		channel = "stable"
 	}
-	return fmt.Sprintf("https://github.com/traego/kube-claw/releases/latest/download/manifest-%s.json", channel)
+	// NOTE: the GitHub org is bitwave-io — NOT the Go module path (traego).
+	// The mismatch shipped in v0.4.0 as a 404 and was caught on the first
+	// production poll; installs on v0.4.0 need updates.manifestURL set.
+	return fmt.Sprintf("https://github.com/bitwave-io/kube-claw/releases/latest/download/manifest-%s.json", channel)
 }
 
 // FetchManifest GETs and validates a release manifest, unsigned (no key
