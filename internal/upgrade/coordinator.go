@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/util/retry"
@@ -214,8 +215,10 @@ func (c *Coordinator) maybePrompt(ctx context.Context, cp *clawv1alpha1.ControlP
 	// FYI to the management channel (no buttons — approval stays personal).
 	if mgmt != "" {
 		text := fmt.Sprintf(":package: kube-claw *%s* is available (running %s).", avail, orDev(cp.Status.RunningVersion))
-		if cp.Status.AvailableNotes != "" {
-			text += "\n> " + cp.Status.AvailableNotes
+		if notes := strings.TrimSpace(cp.Status.AvailableNotes); notes != "" {
+			// Blockquote every line — multi-line notes (tag message bodies)
+			// otherwise escape the quote after the first line.
+			text += "\n> " + strings.ReplaceAll(notes, "\n", "\n> ")
 		}
 		switch {
 		case reason != "":

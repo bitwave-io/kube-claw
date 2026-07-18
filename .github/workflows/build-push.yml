@@ -118,6 +118,8 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Render manifest-stable.json
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/}"        # v0.4.0
@@ -127,14 +129,26 @@ jobs:
           }
           CTRL="docker.io/${NAMESPACE}/kube-claw-controller@$(digest_of kube-claw-controller)"
           RUNNER="docker.io/${NAMESPACE}/kube-claw-runner@$(digest_of kube-claw-runner)"
+          # Release notes ride the ANNOTATED TAG MESSAGE into manifest.notes —
+          # they surface in the Slack upgrade prompt and the management-channel
+          # announcement. Read via the API (the local checkout may not carry
+          # the tag object); lightweight tags => no notes. Capped: this is a
+          # Slack line, not a changelog.
+          NOTES=""
+          TAG_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${VERSION}" --jq 'select(.object.type=="tag") | .object.sha' || true)"
+          if [[ -n "$TAG_SHA" ]]; then
+            NOTES="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq .message | head -c 600 | sed -e 's/[[:space:]]*$//')"
+          fi
           # Flags a release can set via the tag's commit (see docs): a file
           # release/flags.json at the tag may carry requiresHelmUpgrade /
-          # containsMigration / minSupervisorVersion / notes overrides.
+          # containsMigration / minSupervisorVersion / notes overrides (a
+          # notes key there wins over the tag message).
           FLAGS="{}"
           [[ -f release/flags.json ]] && FLAGS="$(cat release/flags.json)"
-          jq -n             --arg version "$VERSION"             --arg controller "$CTRL"             --arg runner "$RUNNER"             --arg releasedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)"             --argjson flags "$FLAGS"             '{schemaVersion: 1, channel: "stable", version: $version,
+          jq -n             --arg version "$VERSION"             --arg controller "$CTRL"             --arg runner "$RUNNER"             --arg releasedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)"             --arg notes "$NOTES"             --argjson flags "$FLAGS"             '{schemaVersion: 1, channel: "stable", version: $version,
               releasedAt: $releasedAt,
               images: {controller: $controller, runner: $runner}}
+             + (if $notes != "" then {notes: $notes} else {} end)
              + $flags' > manifest-stable.json
           cat manifest-stable.json
 
