@@ -18,3 +18,4 @@ secrets.env
 scripts/up-gke.sh
 manifest-sign
 .claude/worktrees/
+site/install.sh

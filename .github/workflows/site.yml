@@ -1,0 +1,45 @@
+# kube-claw.com — Firebase Hosting deploy. Pushes to main touching site/ go
+# live; PRs get an auto-expiring preview channel (URL commented on the PR).
+# One-time setup: create the Firebase project (default id kube-claw-site — if
+# taken, change projectId here AND run `firebase use` locally), then store a
+# deploy service-account JSON as the FIREBASE_SERVICE_ACCOUNT secret
+# (Firebase console → Project settings → Service accounts, or
+# `firebase init hosting:github` which wires all of this automatically).
+name: site
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "firebase.json", ".github/workflows/site.yml"]
+  pull_request:
+    paths: ["site/**", "firebase.json"]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write # preview-channel URL comment
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No-op until the Firebase secret is configured (manual deploys work
+      # meanwhile: firebase deploy --only hosting --project <id>).
+      - name: Check deploy credential
+        id: cred
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [[ -z "$SA" ]]; then
+            echo "FIREBASE_SERVICE_ACCOUNT not set — skipping deploy"
+            echo "have=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.cred.outputs.have == 'true'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: kube-claw-site
+          channelId: ${{ github.event_name == 'push' && 'live' || '' }}
