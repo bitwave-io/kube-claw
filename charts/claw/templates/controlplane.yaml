@@ -32,6 +32,11 @@ spec:
     uiBaseURL: {{ .Values.controller.uiBaseURL }}
     adminSecretName: {{ .Values.controller.adminSecretName }}
     restrictAgentEgress: {{ .Values.controller.restrictAgentEgress }}
+    {{- with .Values.controller.artifacts }}
+    artifacts:
+      ttl: {{ .ttl }}
+      maxTTL: {{ .maxTTL }}
+    {{- end }}
     resources:
       {{- toYaml .Values.controller.resources | nindent 6 }}
     storage:

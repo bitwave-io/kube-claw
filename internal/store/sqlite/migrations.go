@@ -218,6 +218,21 @@ var migrations = []string{
 		value      TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	);`,
+	`CREATE TABLE IF NOT EXISTS artifacts (
+		id         TEXT PRIMARY KEY,
+		run_id     TEXT,
+		session_id TEXT,
+		title      TEXT NOT NULL,
+		content    TEXT NOT NULL,
+		created_at TEXT NOT NULL
+	);`,
+	`CREATE TABLE IF NOT EXISTS artifact_tokens (
+		token_hash  TEXT PRIMARY KEY,
+		artifact_id TEXT NOT NULL,
+		created_at  TEXT NOT NULL,
+		expires_at  TEXT NOT NULL,
+		revoked_at  TEXT
+	);`,
 	`CREATE TABLE IF NOT EXISTS channel_configs (
 		channel          TEXT PRIMARY KEY,
 		agent_ns         TEXT NOT NULL,
@@ -236,6 +251,7 @@ var migrations = []string{
 	`CREATE INDEX IF NOT EXISTS runs_by_created   ON runs(created_at);`,
 	`CREATE INDEX IF NOT EXISTS runs_by_phase     ON runs(phase);`,
 	`CREATE INDEX IF NOT EXISTS run_outputs_by_run ON run_outputs(run_id);`,
+	`CREATE INDEX IF NOT EXISTS artifact_tokens_by_artifact ON artifact_tokens(artifact_id);`,
 	`CREATE INDEX IF NOT EXISTS audit_by_ts       ON audit(ts);`,
 }
 

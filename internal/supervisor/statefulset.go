@@ -53,6 +53,12 @@ func BuildStatefulSet(cp *clawv1alpha1.ControlPlane, des Desired) *appsv1.Statef
 		fmt.Sprintf("--self-url=%s", selfURL),
 		fmt.Sprintf("--log-format=%s", logFormat),
 	}
+	if c.Artifacts != nil {
+		args = append(args,
+			fmt.Sprintf("--artifact-ttl=%s", stringOr(c.Artifacts.TTL, "24h")),
+			fmt.Sprintf("--artifact-max-ttl=%s", stringOr(c.Artifacts.MaxTTL, "168h")),
+		)
+	}
 
 	env := []corev1.EnvVar{
 		{Name: "CLAW_RESTRICT_AGENT_EGRESS", Value: fmt.Sprintf("%t", c.RestrictAgentEgress)},

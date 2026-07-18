@@ -1,0 +1,20 @@
+{{- if .Values.agentPodDisruptionBudget.enabled }}
+# Blocks VOLUNTARY evictions of agent run pods — most importantly the cluster
+# autoscaler's scale-down consolidation, which otherwise kills warm session pods
+# mid-run (the Job restarts them with their in-memory conversation state gone).
+# GKE Autopilot's Warden rejects the safe-to-evict=false annotation for pods
+# requesting <500m CPU, so a maxUnavailable:0 PDB is the mechanism that works.
+# Trade-off: node drains (upgrades) wait on these pods too — bounded by the run
+# Job's activeDeadlineSeconds (30m), after which the pod completes and the drain
+# proceeds.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: claw-agents-no-evict
+  namespace: {{ .Values.agentNamespace }}
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: kube-claw
+{{- end }}

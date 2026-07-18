@@ -38,3 +38,48 @@ func TestSessionToken(t *testing.T) {
 		t.Fatal("expired token verified")
 	}
 }
+
+func TestRefreshTokenKinds(t *testing.T) {
+	s, err := NewSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	access, _ := s.Issue("run-1", []string{"gcp-billing"}, time.Minute)
+	refresh, err := s.IssueRefresh("run-1", "pod-a", "uid-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A refresh token is not a bearer credential.
+	if _, err := s.Verify(refresh); err == nil {
+		t.Fatal("refresh token accepted as access token")
+	}
+	// An access token cannot drive the refresh exchange.
+	if _, err := s.VerifyRefresh(access); err == nil {
+		t.Fatal("access token accepted as refresh token")
+	}
+
+	c, err := s.VerifyRefresh(refresh)
+	if err != nil {
+		t.Fatalf("verify refresh: %v", err)
+	}
+	if c.RunID != "run-1" || c.Kind != KindRefresh || len(c.Secrets) != 0 {
+		t.Fatalf("refresh claims wrong: %+v", c)
+	}
+	if c.PodName != "pod-a" || c.PodUID != "uid-1" {
+		t.Fatalf("refresh token must carry its pod binding: %+v", c)
+	}
+
+	// Expired refresh token → error.
+	exp, _ := s.IssueRefresh("run-1", "pod-a", "uid-1", -time.Second)
+	if _, err := s.VerifyRefresh(exp); err == nil {
+		t.Fatal("expired refresh token verified")
+	}
+
+	// Pre-kind tokens (no kind claim) still verify as access tokens.
+	legacy, _ := s.issue(Claims{RunID: "run-1", Exp: time.Now().Add(time.Minute).Unix()})
+	if _, err := s.Verify(legacy); err != nil {
+		t.Fatalf("legacy kindless token rejected: %v", err)
+	}
+}

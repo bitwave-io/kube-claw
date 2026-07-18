@@ -58,6 +58,13 @@ supervisor:
 # Helm ownership conflicts with the imperatively-created namespace.
 agentNamespace: claw-agents
 
+# PDB (maxUnavailable: 0) over agent run pods so cluster-autoscaler scale-down
+# can't evict a warm session pod mid-run (Autopilot rejects safe-to-evict=false
+# on pods requesting <500m CPU). Drains wait at most the run Job's
+# activeDeadlineSeconds (30m). Disable if you'd rather let consolidation win.
+agentPodDisruptionBudget:
+  enabled: true
+
 controller:
   # Opt-in agent egress restriction (deny east/west). Verify per-cluster before enabling.
   restrictAgentEgress: false
@@ -80,6 +87,14 @@ controller:
   # Public base URL of the secret-intake UI (used in returned links). Override to
   # the Ingress host in prod, or the port-forwarded localhost in dev.
   uiBaseURL: http://localhost:8090
+  # Published-document share links (the agent's publish_document tool). Links are
+  # time-bound; the document itself is kept, so an expired link is reshared (a
+  # fresh link, old ones revoked) by asking the bot in the original thread.
+  artifacts:
+    # Default link lifetime. Go duration, e.g. "24h", "72h".
+    ttl: 24h
+    # Cap on per-publish lifetime overrides.
+    maxTTL: 168h
   # GKE Autopilot requires resource requests; set explicitly to control sizing/cost.
   resources:
     requests:

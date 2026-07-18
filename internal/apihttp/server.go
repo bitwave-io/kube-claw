@@ -28,6 +28,7 @@ import (
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/approvals"
+	"github.com/traego/kube-claw/internal/artifacts"
 	"github.com/traego/kube-claw/internal/connector"
 	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
@@ -47,6 +48,7 @@ type Server struct {
 	Identity  identity.Provider     // /login credential verifier
 	Signer    *identity.Signer      // claw session token signer
 	Approvals *approvals.Service    // shared approval path
+	Artifacts *artifacts.Service    // published documents + share links
 	GitRepos  *gitrepo.Service      // git-repo access approval authority
 	Router    *slackrouter.Router   // connector routing (nil if no routes configured)
 	Notifier  *slackrouter.Notifier // posts replies/approvals to Slack (nil if no bot token)
@@ -96,6 +98,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/outputs", s.postOutput)
+	mux.HandleFunc("POST /v1/runs/{id}/artifacts", s.publishArtifact)
 	mux.HandleFunc("POST /v1/runs/{id}/progress", s.postProgress)
 	mux.HandleFunc("POST /v1/secrets", s.createSecret)
 	mux.HandleFunc("GET /v1/secrets/{name}/metadata", s.secretMetadata)
@@ -106,6 +109,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/secret-grants", s.listGrants)
 	mux.HandleFunc("POST /v1/secret-grants/{id}/revoke", s.revokeGrant)
 	mux.HandleFunc("POST /v1/login", s.login)
+	mux.HandleFunc("POST /v1/token/refresh", s.refreshToken)
 	mux.HandleFunc("POST /v1/runs/{id}/materialize", s.materialize)
 	mux.HandleFunc("POST /v1/base-images", s.createBaseImage)
 	mux.HandleFunc("GET /v1/base-images", s.listBaseImages)
@@ -431,12 +435,20 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 		req.Kind = "text"
 	}
 	var run store.Run
+	alreadyDone := false
 	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
 		got, e := tx.GetRun(id)
 		if e != nil {
 			return e
 		}
 		run = got
+		// Idempotency: a completed run's reply must not post to Slack twice
+		// (runner retry after a timed-out-but-delivered POST, Job backoff
+		// replacement pods, claim/launch races all re-send outputs).
+		if run.Phase == "Succeeded" {
+			alreadyDone = true
+			return nil
+		}
 		if e := tx.AppendOutput(id, store.Output{Kind: req.Kind, Content: req.Content}); e != nil {
 			return e
 		}
@@ -451,6 +463,32 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if alreadyDone {
+		logf.Log.WithName("apihttp").Info("duplicate output ignored — run already succeeded", "run", id)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "already recorded"})
+		return
+	}
+	// A "none" output is the agent declining to reply (the message wasn't for
+	// it, or the run was coalesced into a newer turn): the run is completed and
+	// the 👀 marker cleared above/below, but nothing is posted anywhere.
+	if req.Kind == "none" {
+		if s.Notifier != nil {
+			if ch := slackrouter.SlackChannel(run.Source); ch != "" {
+				if ts := slackrouter.SlackEventTS(run.Source); ts != "" {
+					_ = s.Notifier.RemoveReaction(r.Context(), ch, ts, "eyes")
+				}
+			}
+		}
+		// A connector accepted this run with 202 {runId} — it must still get a
+		// terminal event, or a coalesced/declined run looks stuck forever from
+		// the outside. "none" = the run completed with no reply (absorbed into a
+		// newer turn's answer, or the agent judged no reply was needed).
+		if cid := connector.SourceConnectorID(run.Source); cid != "" {
+			s.deliverToConnector(cid, run, "none", "")
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 		return
 	}
 	// #2: post the agent's reply back to Slack, and clear the 👀 on the
@@ -512,6 +550,74 @@ func replyTopLevel(tx store.Tx, run store.Run, channel string) bool {
 		}
 	}
 	return true
+}
+
+type publishArtifactReq struct {
+	ArtifactID string `json:"artifactId"` // set to reshare an existing document
+	Title      string `json:"title"`
+	Content    string `json:"content"` // markdown
+	TTL        string `json:"ttl"`     // Go duration, e.g. "24h"; empty = default
+}
+
+// publishArtifact is the runner→controller callback behind the agent's
+// publish_document tool: it stores a document (or reuses one on reshare) and
+// returns a time-bound public share link. Authenticated like the other runner
+// callbacks — this does NOT widen the public surface; only GET /d/{token} on
+// the separate UI listener is public.
+func (s *Server) publishArtifact(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.authRunInSession(r, id) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	var req publishArtifactReq
+	// The wire form is JSON: escaping can expand content up to 6x (\uXXXX for
+	// control chars; \\n, \" for the common cases), so the raw-body cap must be
+	// 6*MaxContentBytes or a legal document gets truncated into invalid JSON.
+	// The DECODED content is still held to MaxContentBytes by Publish.
+	if err := json.NewDecoder(io.LimitReader(r.Body, 6*artifacts.MaxContentBytes+64<<10)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	var ttl time.Duration
+	if req.TTL != "" {
+		d, err := time.ParseDuration(req.TTL)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid ttl (use a Go duration, e.g. \"24h\")")
+			return
+		}
+		ttl = d
+	}
+	var run store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetRun(id)
+		run = got
+		return e
+	}); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	pub, err := s.Artifacts.Publish(r.Context(), id, run.SessionID, req.ArtifactID, req.Title, req.Content, ttl)
+	switch {
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, artifacts.ErrWrongSession):
+		// One 404 for both — an agent probing other sessions' artifact ids learns nothing.
+		writeErr(w, http.StatusNotFound, "artifact not found")
+		return
+	case errors.Is(err, artifacts.ErrContentTooLarge):
+		writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"artifactId": pub.ArtifactID,
+		"url":        s.UIBase + "/d/" + pub.Token,
+		"expiresAt":  pub.ExpiresAt.Format(time.RFC3339),
+	})
 }
 
 // --- secrets (Phase 3) ---

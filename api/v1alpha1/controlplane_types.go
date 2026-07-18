@@ -175,6 +175,10 @@ type ControllerConfig struct {
 	// +optional
 	RestrictAgentEgress bool `json:"restrictAgentEgress,omitempty"`
 
+	// Artifacts configures shareable-document link lifetimes.
+	// +optional
+	Artifacts *ArtifactsConfig `json:"artifacts,omitempty"`
+
 	// Resources for the controller container.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
@@ -183,6 +187,18 @@ type ControllerConfig struct {
 	// after creation, like any StatefulSet volumeClaimTemplate).
 	// +optional
 	Storage ControlPlaneStorage `json:"storage,omitempty"`
+}
+
+// ArtifactsConfig mirrors the chart's controller.artifacts values.
+type ArtifactsConfig struct {
+	// TTL is the default share-link lifetime (Go duration, e.g. "24h").
+	// +kubebuilder:default="24h"
+	// +optional
+	TTL string `json:"ttl,omitempty"`
+	// MaxTTL caps per-publish lifetime overrides.
+	// +kubebuilder:default="168h"
+	// +optional
+	MaxTTL string `json:"maxTTL,omitempty"`
 }
 
 // ControlPlaneStorage sizes the controller data volume.

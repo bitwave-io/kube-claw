@@ -67,6 +67,19 @@ spec:
                     description: AdminSecretName holds the admin dashboard basic-auth
                       password.
                     type: string
+                  artifacts:
+                    description: Artifacts configures shareable-document link lifetimes.
+                    properties:
+                      maxTTL:
+                        default: 168h
+                        description: MaxTTL caps per-publish lifetime overrides.
+                        type: string
+                      ttl:
+                        default: 24h
+                        description: TTL is the default share-link lifetime (Go duration,
+                          e.g. "24h").
+                        type: string
+                    type: object
                   dataDir:
                     default: /var/lib/claw
                     type: string

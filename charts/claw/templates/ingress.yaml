@@ -43,8 +43,9 @@ spec:
     port: {{ .Values.service.apiPort }}
 ---
 {{- end }}
-# Secret-intake UI only (DESIGN.md §8.3). Exposes ONLY /ui/secret-intake/* —
-# never /v1/*. The page is served by a separate listener in the controller.
+# Token-gated public pages only (DESIGN.md §8.3): /ui/secret-intake/* and the
+# /d/* artifact share links — never /v1/*. Both are served by a separate
+# listener in the controller.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -77,6 +78,14 @@ spec:
         paths:
           # Public, one-time-token-gated intake UI (separate listener).
           - path: /ui/secret-intake
+            pathType: Prefix
+            backend:
+              service:
+                name: claw-controller
+                port:
+                  number: {{ .Values.service.uiPort }}
+          # Time-bound artifact share links (same token-gated listener).
+          - path: /d
             pathType: Prefix
             backend:
               service:

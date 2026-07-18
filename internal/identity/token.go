@@ -17,9 +17,24 @@ import (
 // Claims is what a claw session token carries.
 type Claims struct {
 	RunID   string   `json:"run"`
-	Secrets []string `json:"secrets"` // secret names this token may materialize
-	Exp     int64    `json:"exp"`     // unix seconds
+	Secrets []string `json:"secrets"`        // secret names this token may materialize
+	Exp     int64    `json:"exp"`            // unix seconds
+	Kind    string   `json:"kind,omitempty"` // "" or KindAccess = access; KindRefresh = refresh-only
+	// PodName/PodUID (refresh tokens only) bind the token to the pod that
+	// logged in: the refresh exchange re-attests that this exact pod still
+	// exists, so a copied refresh token dies with the pod instead of minting
+	// access tokens for its full TTL.
+	PodName string `json:"pod,omitempty"`
+	PodUID  string `json:"uid,omitempty"`
 }
+
+// Token kinds. An access token authenticates runner callbacks; a refresh token
+// is only accepted by the token-refresh exchange. Empty kind means access
+// (tokens issued before kinds existed).
+const (
+	KindAccess  = "access"
+	KindRefresh = "refresh"
+)
 
 // Signer issues + verifies claw session tokens (HMAC-SHA256). The key is random
 // per process; tokens are short-lived (minutes) so a restart simply forces a
@@ -36,9 +51,19 @@ func NewSigner() (*Signer, error) {
 
 var b64 = base64.RawURLEncoding
 
-// Issue returns a signed token: base64(claims).base64(hmac).
+// Issue returns a signed access token: base64(claims).base64(hmac).
 func (s *Signer) Issue(runID string, secrets []string, ttl time.Duration) (string, error) {
-	c := Claims{RunID: runID, Secrets: secrets, Exp: time.Now().Add(ttl).Unix()}
+	return s.issue(Claims{RunID: runID, Secrets: secrets, Exp: time.Now().Add(ttl).Unix(), Kind: KindAccess})
+}
+
+// IssueRefresh returns a signed refresh token bound to the logging-in pod. It
+// carries no secret scopes — scopes are re-derived from current grants at
+// refresh time, and the pod binding is re-attested there too.
+func (s *Signer) IssueRefresh(runID, podName, podUID string, ttl time.Duration) (string, error) {
+	return s.issue(Claims{RunID: runID, Exp: time.Now().Add(ttl).Unix(), Kind: KindRefresh, PodName: podName, PodUID: podUID})
+}
+
+func (s *Signer) issue(c Claims) (string, error) {
 	payload, err := json.Marshal(c)
 	if err != nil {
 		return "", err
@@ -47,8 +72,33 @@ func (s *Signer) Issue(runID string, secrets []string, ttl time.Duration) (strin
 	return p + "." + b64.EncodeToString(s.mac([]byte(p))), nil
 }
 
-// Verify checks the signature + expiry and returns the claims.
+// Verify checks the signature + expiry and returns the claims of an ACCESS
+// token. Refresh tokens are rejected here — they are only good for the refresh
+// exchange (VerifyRefresh), never as a bearer credential.
 func (s *Signer) Verify(token string) (Claims, error) {
+	c, err := s.verify(token)
+	if err != nil {
+		return c, err
+	}
+	if c.Kind == KindRefresh {
+		return c, fmt.Errorf("refresh token used as access token")
+	}
+	return c, nil
+}
+
+// VerifyRefresh checks the signature + expiry of a REFRESH token.
+func (s *Signer) VerifyRefresh(token string) (Claims, error) {
+	c, err := s.verify(token)
+	if err != nil {
+		return c, err
+	}
+	if c.Kind != KindRefresh {
+		return c, fmt.Errorf("not a refresh token")
+	}
+	return c, nil
+}
+
+func (s *Signer) verify(token string) (Claims, error) {
 	var c Claims
 	var p, sig string
 	for i := 0; i < len(token); i++ {
