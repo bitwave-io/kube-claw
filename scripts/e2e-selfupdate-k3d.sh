@@ -132,7 +132,13 @@ ok "manifest server serving"
 # --- Phase A: old chart ---------------------------------------------------------
 step "Phase A: install the OLD chart ($OLD_CHART_REF) with v0.9.0 images"
 git archive "$OLD_CHART_REF" charts | tar -x -C "$WORK"
-kubectl apply -f "$WORK/charts/claw/crds/"
+# The pinned OLD chart predates the CRDs-into-chart move (charts/crds →
+# charts/claw/crds in 0.4.4): apply whichever layout that ref has.
+if [[ -d "$WORK/charts/claw/crds" ]]; then
+  kubectl apply -f "$WORK/charts/claw/crds/"
+else
+  kubectl apply -f "$WORK/charts/crds/"
+fi
 kubectl create ns "$NS" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create ns claw-agents --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install claw "$WORK/charts/claw" -n "$NS" \
