@@ -1,0 +1,37 @@
+# Deploys site/ (the kube-claw.com landing page) to GitHub Pages on every
+# main push that touches it. DNS: point kube-claw.com at GitHub Pages
+# (A records 185.199.108-111.153 + CNAME www → bitwave-io.github.io);
+# site/CNAME pins the custom domain on the Pages side.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
