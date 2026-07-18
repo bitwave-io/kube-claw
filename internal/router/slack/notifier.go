@@ -88,16 +88,17 @@ const adminClaimValue = "adminclaim"
 // DESIGN.md §24.6).
 func (n *Notifier) PostOnboarding(ctx context.Context, target, channel, ns, agent string, offerAdmin bool) error {
 	intro := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn",
-		fmt.Sprintf(":wave: Hi! I'm an AI assistant you can put to work right here in Slack — ask me a question and I'll spin up a sandboxed agent (`%s`) to answer. You just added me to <#%s>, so I need to know how you'd like me to behave in *this* channel.",
+		fmt.Sprintf(":wave: Hi! I'm an AI assistant you can put to work right here in Slack — ask me a question and I'll spin up a sandboxed agent (`%s`) to answer. You just added me to <#%s> and I'm ready now: by default I respond *only when @-mentioned* and keep my replies *in a thread*.",
 			agent, channel), false, false), nil, nil)
 	explain := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn",
-		"*1. When should I respond?*\n"+
+		"Want me to behave differently in *this* channel?\n\n"+
+			"*1. When should I respond?*\n"+
 			"   • *Watch all* — I read every message in the channel and respond when I can help.\n"+
 			"   • *Only @mentions* — I stay quiet unless you `@`-mention me directly.\n\n"+
 			"*2. Where should my replies go?*\n"+
 			"   • *In channel* — my replies post in the channel, visible to everyone.\n"+
 			"   • *In threads* — my replies stay in a thread under your message, keeping the channel tidy.\n\n"+
-			"Pick the combination that fits (you can change it later by removing and re-adding me):",
+			"Pick a combination (you can change it later by removing and re-adding me):",
 		false, false), nil, nil)
 	mk := func(i int, text string, mention, thread bool) *slack.ButtonBlockElement {
 		return slack.NewButtonBlockElement(fmt.Sprintf("onb%d", i), onboardValue(channel, ns, agent, mention, thread),

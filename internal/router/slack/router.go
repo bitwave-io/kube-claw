@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -108,6 +109,23 @@ func mentionsSomeoneElse(text, sender string) bool {
 	return slackUserMention.MatchString(text)
 }
 
+// leadingUserMention matches a message that OPENS with a user mention — the
+// strongest addressee signal ("@Pat could we…" is Pat's question).
+var leadingUserMention = regexp.MustCompile(`^\s*<@[UW][A-Z0-9]+>`)
+
+// startsWithSomeoneElse reports whether the text opens with a mention of a
+// user. Weaker than mentionsSomeoneElse (a mid-text mention like "try what
+// @Pat suggested" does NOT trip it) — used in threads, where a reference to a
+// person is common in messages still addressed to the bot. The bot's own
+// mention never appears (agentText strips it), and the "<@sender>: " speaker
+// prefix is stripped first.
+func startsWithSomeoneElse(text, sender string) bool {
+	if sender != "" {
+		text = strings.TrimPrefix(text, "<@"+sender+">:")
+	}
+	return leadingUserMention.MatchString(strings.TrimSpace(text))
+}
+
 // shouldRespond gates an unprompted reply: the injected RelevanceGate wins, else
 // the Classifier's ShouldRespond, else (no LLM available) the gate is open.
 func (r *Router) shouldRespond(ctx context.Context, text string) bool {
@@ -202,6 +220,31 @@ func (r *Router) takePending(channel string) (pendingMention, bool) {
 		delete(r.pending, channel)
 	}
 	return m, ok
+}
+
+// EnsureChannelDefault stores the default behavior for a channel the bot just
+// joined — respond only to @mentions, reply in threads — so the bot works
+// immediately, before (or without) an onboarding click. Existing config (or a
+// static route's channel) is never overwritten; the onboarding buttons switch
+// modes afterward. Returns true when the default was applied.
+func (r *Router) EnsureChannelDefault(ctx context.Context, channel string) bool {
+	if r.DefaultAgent == "" {
+		return false
+	}
+	applied := false
+	_ = r.Store.Tx(ctx, func(tx store.Tx) error {
+		if _, err := tx.GetChannelConfig(channel); err == nil {
+			return nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		applied = true
+		return tx.SetChannelConfig(store.ChannelConfig{
+			Channel: channel, AgentNamespace: r.agentsNS(), AgentName: r.DefaultAgent,
+			MentionRequired: true, ThreadOnly: true,
+		})
+	})
+	return applied
 }
 
 // HandleOnboard applies an onboarding choice (a channel preset) and returns a
@@ -348,6 +391,14 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 	if pns, pn := r.pickAgent(ctx, text); pn != "" {
 		agentNs, agentName = pns, pn
 	}
+	// Thread origin (drives thread-reply gating): a top-level message starts a
+	// thread FOR the bot (eventID is the message ts; equal to the session/thread
+	// ts) — "own". A mention deep in an existing human thread means the bot was
+	// pulled in — "joined", where it stays judicious.
+	origin := "joined"
+	if eventID == sessionID {
+		origin = "own"
+	}
 	runID := "run-" + randHex()
 	created := false
 	err := r.Store.Tx(ctx, func(tx store.Tx) error {
@@ -358,7 +409,7 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 		if err := tx.CreateRun(store.Run{
 			ID: runID, AgentNamespace: agentNs, AgentName: agentName,
 			SessionID: sessionID, Phase: "Pending",
-			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"user":%q}`, channel, eventID, user),
+			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"user":%q,"thread_origin":%q}`, channel, eventID, user, origin),
 			Input:  fmt.Sprintf(`{"text":%q}`, text),
 		}); err != nil {
 			return err
@@ -393,15 +444,30 @@ func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, thread
 	if !found {
 		return "", nil // not a thread the bot started
 	}
-	// In a busy thread two humans may be talking to each other — don't butt into
-	// every reply. An @mention always proceeds. A reply that @mentions someone
-	// ELSE is addressed to that person and is skipped deterministically, exactly
-	// like the channel path — "@Pat could we give the bot more access?" is a
-	// question for Pat even though it's about the bot, and the LLM gate has
-	// proven too generous with these. Otherwise a default-open gate only
-	// suppresses messages clearly addressed to someone else.
-	if !mentioned && (mentionsSomeoneElse(text, user) || !r.shouldRespondInThread(ctx, text)) {
-		return "", nil
+	// Gating depends on how the bot got here (thread_origin, stamped on the
+	// session's first run and propagated since; pre-0.4.2 runs lack it → treat
+	// as "joined", the stricter mode):
+	//   own    — the thread exists BECAUSE someone addressed the bot: replies
+	//            here are the conversation. Respond to everything except a
+	//            message that OPENS with someone else's @mention ("@Pat could
+	//            we…" is Pat's). No LLM gate.
+	//   joined — the bot was pulled into a human thread: same deterministic
+	//            leading-@ skip, then the LLM gate judges the rest (mid-text
+	//            mentions like "try what @Pat suggested" reach the gate now —
+	//            the old anywhere-in-text skip was too aggressive).
+	// An @mention of the bot always proceeds.
+	ownThread := strings.Contains(prior.Source, `"thread_origin":"own"`)
+	if !mentioned {
+		if startsWithSomeoneElse(text, user) {
+			return "", nil
+		}
+		if !ownThread && !r.shouldRespondInThread(ctx, text) {
+			return "", nil
+		}
+	}
+	origin := "joined"
+	if ownThread {
+		origin = "own"
 	}
 	runID := "run-" + randHex()
 	created := false
@@ -413,7 +479,7 @@ func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, thread
 		if err := tx.CreateRun(store.Run{
 			ID: runID, AgentNamespace: prior.AgentNamespace, AgentName: prior.AgentName,
 			SessionID: threadTS, Phase: "Pending",
-			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"user":%q}`, channel, eventID, user),
+			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"user":%q,"thread_origin":%q}`, channel, eventID, user, origin),
 			Input:  fmt.Sprintf(`{"text":%q}`, text),
 		}); err != nil {
 			return err

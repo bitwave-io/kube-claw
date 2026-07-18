@@ -69,9 +69,14 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 	}
 	switch e := api.InnerEvent.Data.(type) {
 	case *slackevents.MemberJoinedChannelEvent:
-		// The bot itself was added to a channel → ask the inviter how to behave.
+		// The bot itself was added to a channel → apply the working default
+		// (@mentions only, replies in threads) so it's usable immediately, then
+		// ask the inviter whether they want different behavior.
 		if e.User != r.BotUserID || r.Notifier == nil {
 			return
+		}
+		if r.EnsureChannelDefault(ctx, e.Channel) {
+			lg.Info("applied default channel config", "channel", e.Channel)
 		}
 		target := e.Inviter
 		if target == "" {

@@ -95,3 +95,64 @@ func TestPendingMentionReplayedAfterOnboard(t *testing.T) {
 		t.Fatalf("replayed run agent = %q, want assistant", runs[0].AgentName)
 	}
 }
+
+// EnsureChannelDefault: joining a channel applies @mention-only + thread
+// replies immediately (bot usable before any onboarding click), never
+// overwrites an existing choice, and requires a default agent.
+func TestEnsureChannelDefault(t *testing.T) {
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "claw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r := &Router{Store: st, DefaultAgent: "general"}
+
+	if !r.EnsureChannelDefault(ctx, "C_FRESH") {
+		t.Fatal("first join must apply the default config")
+	}
+	var cfg store.ChannelConfig
+	if err := st.Tx(ctx, func(tx store.Tx) error {
+		var e error
+		cfg, e = tx.GetChannelConfig("C_FRESH")
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MentionRequired || !cfg.ThreadOnly || cfg.AgentName != "general" {
+		t.Fatalf("default config = %+v, want @mention-only + threads + general", cfg)
+	}
+
+	// The default makes the channel immediately routable for @mentions only.
+	if rt := r.resolveRoute(ctx, "C_FRESH", true); rt == nil {
+		t.Fatal("a mention must route immediately after the default is applied")
+	}
+	if rt := r.resolveRoute(ctx, "C_FRESH", false); rt != nil {
+		t.Fatalf("an unmentioned message must NOT route under the default, got %+v", rt)
+	}
+
+	// Re-join (or a raced second event) must not clobber a user's choice.
+	_ = r.HandleOnboard(ctx, onboardValue("C_FRESH", "claw-agents", "assistant", false, false))
+	if r.EnsureChannelDefault(ctx, "C_FRESH") {
+		t.Fatal("an onboarded channel must not be reset to the default")
+	}
+	if err := st.Tx(ctx, func(tx store.Tx) error {
+		var e error
+		cfg, e = tx.GetChannelConfig("C_FRESH")
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MentionRequired || cfg.AgentName != "assistant" {
+		t.Fatalf("user's onboarding choice was clobbered: %+v", cfg)
+	}
+
+	// No default agent configured → nothing stored.
+	bare := &Router{Store: st}
+	if bare.EnsureChannelDefault(ctx, "C_OTHER") {
+		t.Fatal("no DefaultAgent → the default must not be applied")
+	}
+}

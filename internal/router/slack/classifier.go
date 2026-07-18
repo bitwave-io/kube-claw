@@ -82,6 +82,7 @@ func (c *Classifier) ShouldRespondInThread(ctx context.Context, message string) 
 		"\"can you also check the staging cluster?\" → YES\n" +
 		"\"they're approved, try again\" → YES\n" +
 		"\"actually skip that, just the prod project\" → YES\n" +
+		"\"can you try what <@U0PAT> suggested above?\" → YES (mentions Pat, but asks the assistant)\n" +
 		"\"<@U0PAT> could we give it access to the other projects too?\" → NO (asks Pat, not the assistant)\n" +
 		"\"Sarah's got the billing question\" → NO"
 	return c.yesNo(ctx, sys, "Thread reply:\n"+message, true)
