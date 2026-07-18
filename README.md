@@ -20,6 +20,13 @@ value never enters the model's context or the logs.
 Slack app + Anthropic API key. No Docker build, no repo clone — the chart and images
 are published to Docker Hub (`docker.io/bitwavecode/*`).
 
+**One-liner** (interactive — prompts for tokens/keys, stores them as Kubernetes
+Secrets, rolls out the control plane; no clone needed):
+
+```bash
+curl -fsSL https://kube-claw.com/install.sh | bash
+```
+
 **Helm-only install** (the chart is self-contained — CRDs included, signed
 self-updates verified out of the box; every knob is a value):
 
