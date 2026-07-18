@@ -190,8 +190,8 @@ capability (e.g. a `gcp-cost` agent on the gcloud image, a general `helper` agen
 
 ### The agent loop
 
-`claw-runner` runs a Claude tool-use loop (model `claude-opus-4-8`, adaptive
-thinking) with three tools:
+`claw-runner` runs a tool-use loop (Claude `claude-opus-4-8` by default,
+adaptive thinking) with four tools:
 
 - **`bash`** — runs shell commands in the container (whatever the base image
   provides: `gcloud`/`bq`, `aws`, `az`, `curl`, `python3`, …).
@@ -202,9 +202,24 @@ thinking) with three tools:
   behind a **time-bound share link** you can hand to tools outside Slack — e.g. a
   local coding agent. The reply states the expiry; say "reshare" in the thread for
   a fresh link. See [`docs/document-sharing.md`](docs/document-sharing.md).
+- **`switch_model`** — switches the conversation to another registered model
+  ("use gpt5 for this"), effective immediately and audited.
 
 Without an Anthropic key the runner falls back to a stub (still proves the
 materialize → respond path).
+
+### Models (multi-provider)
+
+The admin UI's **Models** page is the LLM registry: register Anthropic models,
+OpenAI models, or **any OpenAI-compatible endpoint** (vLLM, Ollama, OpenRouter,
+LM Studio — set the base URL, leave the key blank for keyless local engines),
+and pick the **install default** every conversation starts on. API keys are
+AEAD-encrypted in the store (write-only in the UI) and handed to run pods
+per-turn over the same authenticated channel as secret materialization — never
+via pod env. Any thread can switch among *registered* models by just asking
+the agent; the reply footer's model tag confirms what actually served. With no
+models registered, the runner uses the legacy env config
+(`claw-anthropic-key` + `CLAW_MODEL`), so existing installs upgrade cleanly.
 
 ### Secret authority
 

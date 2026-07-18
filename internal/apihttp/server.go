@@ -32,6 +32,7 @@ import (
 	"github.com/traego/kube-claw/internal/connector"
 	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
+	"github.com/traego/kube-claw/internal/models"
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
@@ -50,6 +51,7 @@ type Server struct {
 	Approvals *approvals.Service    // shared approval path
 	Artifacts *artifacts.Service    // published documents + share links
 	GitRepos  *gitrepo.Service      // git-repo access approval authority
+	Models    *models.Service       // LLM registry (multi-model support)
 	Router    *slackrouter.Router   // connector routing (nil if no routes configured)
 	Notifier  *slackrouter.Notifier // posts replies/approvals to Slack (nil if no bot token)
 	Deliverer *connector.Deliverer  // pushes run events to connector callbacks (nil = default)
@@ -137,6 +139,12 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/gitrepo-requests", s.listGitRepoRequests)
 	mux.HandleFunc("POST /v1/gitrepo-requests/{id}/approve", s.approveGitRepoRequest)
 	mux.HandleFunc("POST /v1/gitrepo-requests/{id}/deny", s.denyGitRepoRequest)
+	mux.HandleFunc("GET /v1/models", s.listModels)
+	mux.HandleFunc("POST /v1/models", s.upsertModel)
+	mux.HandleFunc("DELETE /v1/models/{name}", s.deleteModel)
+	mux.HandleFunc("POST /v1/models/{name}/default", s.setDefaultModel)
+	mux.HandleFunc("GET /v1/runs/{id}/model", s.runModel)
+	mux.HandleFunc("POST /v1/runs/{id}/model", s.switchRunModel)
 	mux.HandleFunc("GET /v1/gitrepo-grants", s.listGitRepoGrants)
 	mux.HandleFunc("POST /v1/gitrepo-grants/{id}/revoke", s.revokeGitRepoGrant)
 	mux.HandleFunc("GET /v1/runs/{id}/available-gitrepos", s.availableGitRepos)
@@ -183,6 +191,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/channels", s.channelsPage)
 	mux.HandleFunc("GET /ui/settings", s.settingsPage)
 	mux.HandleFunc("POST /ui/settings", s.uiSetSettings)
+	mux.HandleFunc("GET /ui/models", s.modelsPage)
+	mux.HandleFunc("POST /ui/models", s.modelsSubmit)
 	return s.withAdminAuth(mux)
 }
 

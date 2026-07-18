@@ -29,6 +29,16 @@ const noReply = "NO_REPLY"
 type agentSession struct {
 	client        anthropic.Client
 	model         anthropic.Model
+
+	// Registry-resolved provider config, refreshed from the controller each
+	// turn (and after switch_model). Empty provider = legacy env config,
+	// which is the Anthropic client built at session start.
+	modelProvider string
+	modelName     string // registry handle users switch by, e.g. "gpt5"
+	modelID       string
+	modelBaseURL  string
+	modelAPIKey   string
+	modelAvail    string // formatted registry listing for switch_model
 	sys           string
 	tools         []anthropic.ToolUnionParam
 	messages      []anthropic.MessageParam
@@ -348,11 +358,24 @@ func newAgentSession(systemPrompt string) *agentSession {
 			Required: []string{"title"},
 		},
 	}
+	switchModelTool := anthropic.ToolParam{
+		Name: "switch_model",
+		Description: anthropic.String("Switch THIS conversation to another configured model, or list what's available. " +
+			"Call with no arguments to see the registry (names, providers, notes). Call with {\"model\":\"<name>\"} to " +
+			"switch — it takes effect immediately (the rest of this reply included), persists for this thread, and is " +
+			"audited. Only models an operator registered in the admin UI are reachable. Use it when a user asks for a " +
+			"different / smarter / cheaper / self-hosted model."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"model": map[string]any{"type": "string", "description": "registered model name to switch to; omit to list the options"},
+			},
+		},
+	}
 	return &agentSession{
 		client:        anthropic.NewClient(), // reads ANTHROPIC_API_KEY
 		model:         model,
 		sys:           sys,
-		tools:         []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool}},
+		tools:         []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool}, {OfTool: &switchModelTool}},
 		controllerURL: os.Getenv("CLAW_CONTROLLER_URL"),
 		runID:         os.Getenv("CLAW_RUN_ID"),
 		agentName:     os.Getenv("CLAW_AGENT_NAME"),
@@ -448,6 +471,7 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 	s.compactHistory()
 	s.messages = append(s.messages, anthropic.NewUserMessage(anthropic.NewTextBlock(userText)))
 	s.turnInTokens, s.turnOutTokens = 0, 0
+	s.refreshModelConfig(ctx)
 	adaptive := anthropic.ThinkingConfigAdaptiveParam{}
 
 	// Everything in this turn — model calls, bash, approval waits, heartbeat —
@@ -529,7 +553,13 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 					_ = json.Unmarshal(raw, &in)
 					s.setStep("Requesting credential " + in.Name + "…")
 					result = s.requestSecret(tctx, in.Name, in.Description, in.Reason, in.EnvVar)
-				case "publish_document":
+				case "switch_model":
+				var in struct {
+					Model string `json:"model"`
+				}
+				_ = json.Unmarshal(raw, &in)
+				result = s.switchModel(tctx, in.Model)
+			case "publish_document":
 					var in struct {
 						Title      string `json:"title"`
 						Markdown   string `json:"markdown"`
@@ -729,6 +759,10 @@ func (s *agentSession) callModel(ctx context.Context, params anthropic.MessageNe
 		if errors.As(err, &apiErr) && !retryableStatus(apiErr.StatusCode) {
 			return nil, lastErr
 		}
+		var provErr *httpStatusError
+		if errors.As(err, &provErr) && !retryableStatus(provErr.code) {
+			return nil, lastErr
+		}
 		if attempt >= len(backoffs) {
 			return nil, lastErr
 		}
@@ -749,6 +783,9 @@ func (s *agentSession) callModel(ctx context.Context, params anthropic.MessageNe
 // requests that could outlive its 10-minute generation cap ("streaming is
 // required for operations that may take longer than 10 minutes").
 func (s *agentSession) streamModel(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	if s.modelProvider == "openai" {
+		return s.openaiStream(ctx, params)
+	}
 	stream := s.client.Messages.NewStreaming(ctx, params)
 	msg := anthropic.Message{}
 	for stream.Next() {

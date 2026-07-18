@@ -235,6 +235,26 @@ type Tx interface {
 	// RevokeArtifactTokens revokes all live tokens for an artifact (reshare).
 	RevokeArtifactTokens(artifactID string) error
 
+	// --- models (the LLM registry: UI-managed providers/endpoints/keys) ---
+
+	// UpsertModel creates or replaces a named model configuration.
+	UpsertModel(m Model) error
+	// GetModel returns a model by name, or ErrNotFound.
+	GetModel(name string) (Model, error)
+	// ListModels returns all configured models, default first then by name.
+	ListModels() ([]Model, error)
+	// DeleteModel removes a model (and any session overrides pointing at it).
+	DeleteModel(name string) error
+	// SetDefaultModel marks one model as the install default (clears others
+	// atomically). ErrNotFound if the model doesn't exist.
+	SetDefaultModel(name string) error
+	// GetDefaultModel returns the default model, or ErrNotFound when none set.
+	GetDefaultModel() (Model, error)
+	// SetSessionModel pins a session (Slack thread) to a named model.
+	SetSessionModel(sessionID, modelName, setBy string) error
+	// GetSessionModel returns the session's pinned model name, or ErrNotFound.
+	GetSessionModel(sessionID string) (string, error)
+
 	// --- schedules (cron-triggered agent invocations) ---
 
 	// SetSchedule creates or replaces a schedule.
@@ -505,6 +525,28 @@ type BaseImage struct {
 	Description string `json:"description,omitempty"`
 	CreatedAt   string `json:"createdAt"`
 }
+
+// Model is one UI-managed LLM configuration the agent loop can run on:
+// Anthropic, OpenAI, or any OpenAI-compatible endpoint (vLLM, Ollama,
+// OpenRouter, …) via BaseURL. The API key is AEAD-encrypted at rest (the
+// models service owns encrypt/decrypt); it is never rendered back to the UI.
+type Model struct {
+	Name     string `json:"name"`     // unique handle, e.g. "opus", "gpt5", "local-llama"
+	Provider string `json:"provider"` // "anthropic" | "openai" (OpenAI-compatible wire format)
+	ModelID  string `json:"modelId"`  // provider model id, e.g. claude-opus-4-8, gpt-5.2
+	// BaseURL overrides the provider's default endpoint (self-hosted /
+	// gateway). "" = provider default.
+	BaseURL string `json:"baseUrl,omitempty"`
+	// APIKeyCiphertext is the AEAD-encrypted API key; empty for keyless
+	// self-hosted endpoints. Never serialized to JSON.
+	APIKeyCiphertext []byte `json:"-"`
+	Notes            string `json:"notes,omitempty"`
+	IsDefault        bool   `json:"isDefault"`
+	UpdatedAt        string `json:"updatedAt"`
+}
+
+// ModelProviders are the accepted Model.Provider values.
+var ModelProviders = []string{"anthropic", "openai"}
 
 // NowRFC3339 is the canonical timestamp format used for stored rows.
 func NowRFC3339() string { return time.Now().UTC().Format(time.RFC3339Nano) }

@@ -233,6 +233,23 @@ var migrations = []string{
 		expires_at  TEXT NOT NULL,
 		revoked_at  TEXT
 	);`,
+	// The LLM model registry (UI-managed) + per-session (thread) overrides.
+	`CREATE TABLE IF NOT EXISTS models (
+		name           TEXT PRIMARY KEY,
+		provider       TEXT NOT NULL,
+		model_id       TEXT NOT NULL,
+		base_url       TEXT,
+		api_key_cipher BLOB,
+		notes          TEXT,
+		is_default     INTEGER NOT NULL DEFAULT 0,
+		updated_at     TEXT NOT NULL
+	);`,
+	`CREATE TABLE IF NOT EXISTS session_models (
+		session_id TEXT PRIMARY KEY,
+		model_name TEXT NOT NULL,
+		set_by     TEXT,
+		set_at     TEXT NOT NULL
+	);`,
 	`CREATE TABLE IF NOT EXISTS channel_configs (
 		channel          TEXT PRIMARY KEY,
 		agent_ns         TEXT NOT NULL,
