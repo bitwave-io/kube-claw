@@ -56,6 +56,9 @@ const (
 	// AnnotationUpgradeAdmin mirrors the store's upgrade-admin setting so the
 	// supervisor (which has no store access) can DM rollback failures.
 	AnnotationUpgradeAdmin = "claw.run/upgrade-admin"
+	// AnnotationMgmtChannel mirrors the store's management-channel setting so
+	// the supervisor can post failures there too.
+	AnnotationMgmtChannel = "claw.run/management-channel"
 )
 
 // ControlPlaneSpec is Helm-owned policy: which release stream to follow, who

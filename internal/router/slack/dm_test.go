@@ -63,3 +63,60 @@ func TestHandleDM_RegistersSecretWithDMUserAsGranter(t *testing.T) {
 		return nil
 	})
 }
+
+// DM "announce releases in #channel" sets the management channel; only the
+// upgrade admin may change it once one is claimed; "stop" clears it.
+func TestAnnounceReleasesDM(t *testing.T) {
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "claw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r := &Router{Store: st}
+
+	getMgmt := func() string {
+		var v string
+		_ = st.Tx(ctx, func(tx store.Tx) error {
+			v, _ = tx.GetSetting(store.SettingMgmtChannel)
+			return nil
+		})
+		return v
+	}
+
+	// No admin claimed: anyone can set it.
+	reply := r.HandleDM(ctx, "U1", "announce releases in <#C0MGMT|kube-claw-mgmt>")
+	if !strings.Contains(reply, "<#C0MGMT>") || getMgmt() != "C0MGMT" {
+		t.Fatalf("set failed: reply=%q mgmt=%q", reply, getMgmt())
+	}
+
+	// Missing channel ref → usage hint, unchanged.
+	reply = r.HandleDM(ctx, "U1", "announce releases somewhere")
+	if !strings.Contains(reply, "Which channel") || getMgmt() != "C0MGMT" {
+		t.Fatalf("usage hint failed: reply=%q mgmt=%q", reply, getMgmt())
+	}
+
+	// With an admin claimed, others are refused.
+	if err := st.Tx(ctx, func(tx store.Tx) error {
+		return tx.SetSetting(store.SettingUpgradeAdmin, "U_ADMIN")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reply = r.HandleDM(ctx, "U_OTHER", "announce releases in <#C0EVIL>")
+	if !strings.Contains(reply, "upgrade admin") || getMgmt() != "C0MGMT" {
+		t.Fatalf("non-admin change not refused: reply=%q mgmt=%q", reply, getMgmt())
+	}
+
+	// The admin can change and stop it.
+	_ = r.HandleDM(ctx, "U_ADMIN", "announce releases in <#C1NEW>")
+	if getMgmt() != "C1NEW" {
+		t.Fatalf("admin change failed: mgmt=%q", getMgmt())
+	}
+	reply = r.HandleDM(ctx, "U_ADMIN", "stop announcing releases")
+	if !strings.Contains(reply, "stop") || getMgmt() != "" {
+		t.Fatalf("stop failed: reply=%q mgmt=%q", reply, getMgmt())
+	}
+}

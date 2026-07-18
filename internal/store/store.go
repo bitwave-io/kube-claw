@@ -259,6 +259,9 @@ const (
 	// SettingNotifiedVersion is the last availableVersion announced in Slack,
 	// so detection doesn't re-DM on every poll.
 	SettingNotifiedVersion = "upgrade_notified_version"
+	// SettingMgmtChannel is the Slack channel where releases and upgrade
+	// lifecycle events (available/applied/rolled back) are announced.
+	SettingMgmtChannel = "management_channel"
 	// SettingRemindAfter is an RFC3339 time before which the upgrade prompt is
 	// suppressed ("Remind me later").
 	SettingRemindAfter = "upgrade_remind_after"

@@ -495,10 +495,11 @@ func (s *Server) channelsPage(w http.ResponseWriter, r *http.Request) {
 // settingsPage shows install-wide settings: the running version and the
 // upgrade admin (DESIGN.md §24.6), with a form to override the admin.
 func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
-	data := struct{ Version, Admin, Skipped string }{Version: version.Get()}
+	data := struct{ Version, Admin, Skipped, Mgmt string }{Version: version.Get()}
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
 		data.Admin, _ = tx.GetSetting(store.SettingUpgradeAdmin)
 		data.Skipped, _ = tx.GetSetting(store.SettingSkippedVersion)
+		data.Mgmt, _ = tx.GetSetting(store.SettingMgmtChannel)
 		return nil
 	})
 	body := `<p class=mut>Running controller version: <code>{{.D.Version}}</code>{{if .D.Skipped}} · skipped release: <code>{{.D.Skipped}}</code>{{end}}</p>
@@ -506,16 +507,22 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 <p class=mut>The Slack user asked to approve kube-claw upgrades. Claimed during channel onboarding; override it here or with <code>claw settings set upgrade-admin U…</code>.</p>
 <form method=post action=/ui/settings>
 <label>Slack user id <input name=upgradeAdmin value="{{.D.Admin}}" placeholder="U0123456789"></label>
+<label>Management channel <input name=mgmtChannel value="{{.D.Mgmt}}" placeholder="C0123456789"></label>
 <button type=submit>Save</button>
-</form>`
+</form>
+<p class=mut>The management channel gets release announcements and upgrade lifecycle events (available, applied, rolled back). The bot must be a member of it. Also settable by DMing the bot <code>announce releases in #channel</code>.</p>`
 	s.renderDash(w, "settings", "Settings", body, data)
 }
 
-// uiSetSettings applies the settings form (today: the upgrade admin).
+// uiSetSettings applies the settings form (upgrade admin + management channel).
 func (s *Server) uiSetSettings(w http.ResponseWriter, r *http.Request) {
 	admin := strings.TrimSpace(r.FormValue("upgradeAdmin"))
+	mgmt := strings.TrimSpace(r.FormValue("mgmtChannel"))
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
-		return tx.SetSetting(store.SettingUpgradeAdmin, admin)
+		if err := tx.SetSetting(store.SettingUpgradeAdmin, admin); err != nil {
+			return err
+		}
+		return tx.SetSetting(store.SettingMgmtChannel, mgmt)
 	})
 	http.Redirect(w, r, "/ui/settings", http.StatusSeeOther)
 }

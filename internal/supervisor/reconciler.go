@@ -435,16 +435,23 @@ func (r *Reconciler) pastDeadline(cp *clawv1alpha1.ControlPlane, started *metav1
 	return r.now().After(started.Add(deadline))
 }
 
-// notifyAdmin best-effort delivers a failure message to the upgrade admin
-// (mirrored onto the CR by the controller — the supervisor has no store).
+// notifyAdmin best-effort delivers a failure message to the upgrade admin and
+// the management channel (both mirrored onto the CR by the controller — the
+// supervisor has no store).
 func (r *Reconciler) notifyAdmin(ctx context.Context, cp *clawv1alpha1.ControlPlane, text string) {
 	admin := cp.Annotations[clawv1alpha1.AnnotationUpgradeAdmin]
-	if r.Notify == nil || admin == "" {
+	mgmt := cp.Annotations[clawv1alpha1.AnnotationMgmtChannel]
+	if r.Notify == nil || (admin == "" && mgmt == "") {
 		logf.FromContext(ctx).Info("upgrade notification (no notifier/admin)", "text", text)
 		return
 	}
-	if err := r.Notify.Notify(ctx, admin, text); err != nil {
-		logf.FromContext(ctx).Error(err, "notify upgrade admin")
+	for _, target := range []string{admin, mgmt} {
+		if target == "" {
+			continue
+		}
+		if err := r.Notify.Notify(ctx, target, text); err != nil {
+			logf.FromContext(ctx).Error(err, "notify upgrade target", "target", target)
+		}
 	}
 }
 

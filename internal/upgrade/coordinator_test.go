@@ -29,8 +29,8 @@ func (f *fakePoster) PostUpgradePrompt(_ context.Context, _, _, available, _, re
 	f.prompts = append(f.prompts, available+"|canApply="+boolStr(canApply)+"|reason="+reason)
 	return nil
 }
-func (f *fakePoster) PostReply(_ context.Context, _, _, text string) error {
-	f.announces = append(f.announces, text)
+func (f *fakePoster) PostReply(_ context.Context, target, _, text string) error {
+	f.announces = append(f.announces, target+"|"+text)
 	return nil
 }
 func boolStr(b bool) string {
@@ -180,6 +180,86 @@ func TestPromptFlow(t *testing.T) {
 	}
 	if len(poster.prompts) != 1 {
 		t.Fatalf("prompted a skipped version: %v", poster.prompts)
+	}
+}
+
+// TestManagementChannel: a configured management channel gets the release
+// announcement (alongside the admin prompt), works without any admin, is
+// mirrored onto the CR for the supervisor, and the notified marker stops
+// re-announcements.
+func TestManagementChannel(t *testing.T) {
+	ctx := context.Background()
+	cp := baseCP()
+	cp.Status.RunningVersion = "v0.4.0"
+	cp.Status.AvailableVersion = "v0.5.0"
+	cp.Status.AvailableControllerImage = "repo/controller@sha256:aaa"
+	cp.Status.AvailableRunnerImage = "repo/runner@sha256:bbb"
+	coord, c, poster := testCoordinator(t, cp)
+	setAdmin(t, coord, "U_ADMIN")
+	if err := coord.setSetting(ctx, store.SettingMgmtChannel, "C_MGMT"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := coord.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(poster.prompts) != 1 {
+		t.Fatalf("prompts = %v", poster.prompts)
+	}
+	if len(poster.announces) != 1 || !strings.HasPrefix(poster.announces[0], "C_MGMT|") ||
+		!strings.Contains(poster.announces[0], "v0.5.0") || !strings.Contains(poster.announces[0], "<@U_ADMIN>") {
+		t.Fatalf("channel announcement = %v", poster.announces)
+	}
+	// Channel annotation mirrored for the supervisor's failure notifications.
+	if got := getCP(t, c); got.Annotations[clawv1alpha1.AnnotationMgmtChannel] != "C_MGMT" {
+		t.Fatalf("mgmt mirror = %q", got.Annotations[clawv1alpha1.AnnotationMgmtChannel])
+	}
+	// Notified marker suppresses a re-announce.
+	if err := coord.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(poster.announces) != 1 {
+		t.Fatalf("re-announced: %v", poster.announces)
+	}
+
+	// announce() (boot "upgraded ✅") reaches both targets.
+	coord.announce(ctx, "✅ test announce")
+	if len(poster.announces) != 3 ||
+		!strings.HasPrefix(poster.announces[1], "U_ADMIN|") || !strings.HasPrefix(poster.announces[2], "C_MGMT|") {
+		t.Fatalf("announce targets = %v", poster.announces)
+	}
+}
+
+// TestManagementChannelWithoutAdmin: with no admin claimed the channel still
+// gets the announcement (with a claim hint), no prompt is attempted, and the
+// notified marker is set.
+func TestManagementChannelWithoutAdmin(t *testing.T) {
+	ctx := context.Background()
+	cp := baseCP()
+	cp.Status.RunningVersion = "v0.4.0"
+	cp.Status.AvailableVersion = "v0.5.0"
+	cp.Status.AvailableControllerImage = "repo/controller@sha256:aaa"
+	cp.Status.AvailableRunnerImage = "repo/runner@sha256:bbb"
+	coord, _, poster := testCoordinator(t, cp)
+	if err := coord.setSetting(ctx, store.SettingMgmtChannel, "C_MGMT"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := coord.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(poster.prompts) != 0 {
+		t.Fatalf("no admin but prompted: %v", poster.prompts)
+	}
+	if len(poster.announces) != 1 || !strings.HasPrefix(poster.announces[0], "C_MGMT|") ||
+		!strings.Contains(poster.announces[0], "No upgrade admin") {
+		t.Fatalf("channel announcement = %v", poster.announces)
+	}
+	if err := coord.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(poster.announces) != 1 {
+		t.Fatalf("re-announced without admin: %v", poster.announces)
 	}
 }
 

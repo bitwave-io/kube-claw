@@ -139,11 +139,14 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 	return c.maybePrompt(ctx, &cp)
 }
 
-// mirrorAdmin copies the store's upgrade-admin setting onto the CR annotation
-// so the supervisor (no store access) can DM rollback failures (§24.6).
+// mirrorAdmin copies the store's upgrade-admin and management-channel settings
+// onto CR annotations so the supervisor (no store access) can deliver rollback
+// failures (§24.6).
 func (c *Coordinator) mirrorAdmin(ctx context.Context, cp *clawv1alpha1.ControlPlane) error {
 	admin, _ := c.getSetting(ctx, store.SettingUpgradeAdmin)
-	if cp.Annotations[clawv1alpha1.AnnotationUpgradeAdmin] == admin {
+	mgmt, _ := c.getSetting(ctx, store.SettingMgmtChannel)
+	if cp.Annotations[clawv1alpha1.AnnotationUpgradeAdmin] == admin &&
+		cp.Annotations[clawv1alpha1.AnnotationMgmtChannel] == mgmt {
 		return nil
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -155,6 +158,7 @@ func (c *Coordinator) mirrorAdmin(ctx context.Context, cp *clawv1alpha1.ControlP
 			fresh.Annotations = map[string]string{}
 		}
 		fresh.Annotations[clawv1alpha1.AnnotationUpgradeAdmin] = admin
+		fresh.Annotations[clawv1alpha1.AnnotationMgmtChannel] = mgmt
 		return c.Writer.Update(ctx, &fresh)
 	})
 }
@@ -189,8 +193,13 @@ func (c *Coordinator) maybePrompt(ctx context.Context, cp *clawv1alpha1.ControlP
 		return nil // failed here before; never re-offer automatically
 	}
 	admin, err := c.getSetting(ctx, store.SettingUpgradeAdmin)
-	if err != nil || admin == "" {
-		// No admin claimed: surfaced via /ui/settings + CLI; nothing to DM.
+	if err != nil {
+		return nil
+	}
+	mgmt, _ := c.getSetting(ctx, store.SettingMgmtChannel)
+	if admin == "" && mgmt == "" {
+		// Nobody to tell: surfaced via /ui/settings + CLI. Deliberately does NOT
+		// burn the notified marker — the prompt fires once a target appears.
 		return nil
 	}
 
@@ -202,11 +211,31 @@ func (c *Coordinator) maybePrompt(ctx context.Context, cp *clawv1alpha1.ControlP
 	if cp.Spec.Updates.Mode == clawv1alpha1.UpdateModeAuto && !cp.Status.AvailableRequiresHelm {
 		return nil // auto mode: the poller self-approves; the boot announce covers it
 	}
-	if err := c.Notifier.PostUpgradePrompt(ctx, admin, orDev(cp.Status.RunningVersion), avail,
-		cp.Status.AvailableNotes, reason, cp.Status.AvailableContainsMigration, canApply); err != nil {
-		return err
+	// FYI to the management channel (no buttons — approval stays personal).
+	if mgmt != "" {
+		text := fmt.Sprintf(":package: kube-claw *%s* is available (running %s).", avail, orDev(cp.Status.RunningVersion))
+		if cp.Status.AvailableNotes != "" {
+			text += "\n> " + cp.Status.AvailableNotes
+		}
+		switch {
+		case reason != "":
+			text += "\n_" + reason + "_"
+		case admin != "":
+			text += fmt.Sprintf("\nI've asked <@%s> to approve.", admin)
+		default:
+			text += "\nNo upgrade admin is claimed — set one (`claw settings set upgrade-admin U…`) to approve from Slack."
+		}
+		if err := c.Notifier.PostReply(ctx, mgmt, "", text); err != nil {
+			logf.Log.WithName("upgrade").Error(err, "announce release to management channel")
+		}
 	}
-	logf.Log.WithName("upgrade").Info("posted upgrade prompt", "available", avail, "canApply", canApply)
+	if admin != "" {
+		if err := c.Notifier.PostUpgradePrompt(ctx, admin, orDev(cp.Status.RunningVersion), avail,
+			cp.Status.AvailableNotes, reason, cp.Status.AvailableContainsMigration, canApply); err != nil {
+			return err
+		}
+		logf.Log.WithName("upgrade").Info("posted upgrade prompt", "available", avail, "canApply", canApply)
+	}
 	return c.setSetting(ctx, store.SettingNotifiedVersion, avail)
 }
 
@@ -294,17 +323,21 @@ func (c *Coordinator) Status(ctx context.Context) (map[string]any, error) {
 	return out, nil
 }
 
-// announce best-effort DMs the upgrade admin.
+// announce best-effort delivers lifecycle news to the upgrade admin (DM) and
+// the management channel, when either is configured.
 func (c *Coordinator) announce(ctx context.Context, text string) {
 	if c.Notifier == nil {
 		return
 	}
-	admin, err := c.getSetting(ctx, store.SettingUpgradeAdmin)
-	if err != nil || admin == "" {
-		return
-	}
-	if err := c.Notifier.PostReply(ctx, admin, "", text); err != nil {
-		logf.Log.WithName("upgrade").Error(err, "announce to admin")
+	admin, _ := c.getSetting(ctx, store.SettingUpgradeAdmin)
+	mgmt, _ := c.getSetting(ctx, store.SettingMgmtChannel)
+	for _, target := range []string{admin, mgmt} {
+		if target == "" {
+			continue
+		}
+		if err := c.Notifier.PostReply(ctx, target, "", text); err != nil {
+			logf.Log.WithName("upgrade").Error(err, "announce", "target", target)
+		}
 	}
 }
 

@@ -27,6 +27,7 @@ var settingKeys = map[string]string{
 	"upgrade-admin":            store.SettingUpgradeAdmin,
 	"upgrade-skipped-version":  store.SettingSkippedVersion,
 	"upgrade-notified-version": store.SettingNotifiedVersion,
+	"management-channel":       store.SettingMgmtChannel,
 }
 
 // listSettings returns the allowlisted settings and their values ("" = unset).
@@ -62,7 +63,7 @@ func (s *Server) setSetting(w http.ResponseWriter, r *http.Request) {
 	}
 	key, ok := settingKeys[r.PathValue("key")]
 	if !ok {
-		writeErr(w, http.StatusNotFound, "unknown setting (known: upgrade-admin, upgrade-skipped-version, upgrade-notified-version)")
+		writeErr(w, http.StatusNotFound, "unknown setting (known: upgrade-admin, upgrade-skipped-version, upgrade-notified-version, management-channel)")
 		return
 	}
 	var req struct {

@@ -320,13 +320,48 @@ func (r *Router) HandleAdminClaim(ctx context.Context, slackUserID string) strin
 	return fmt.Sprintf("You're the upgrade admin, <@%s> ✅ — I'll DM you when a new kube-claw release is available.", slackUserID)
 }
 
-// HandleDM handles a direct message to the bot. Today it supports secret
-// registration: "register secret <name> [description]" mints a one-time intake
-// link with the DMing user as the secret's granter. Returns the reply text.
+// slackChannelRef matches an encoded channel reference (<#C…> or <#C…|name>).
+var slackChannelRef = regexp.MustCompile(`<#(C[A-Z0-9]+)(?:\|[^>]*)?>`)
+
+// handleAnnounceCommand processes "announce releases in <#C…>" (and "stop
+// announcing releases"): sets/clears the management channel where releases and
+// upgrade lifecycle events are posted. When an upgrade admin is claimed, only
+// the admin may change it.
+func (r *Router) handleAnnounceCommand(ctx context.Context, userID, text string) string {
+	if admin, ok := r.UpgradeAdmin(ctx); ok && admin != userID {
+		return fmt.Sprintf("Only the upgrade admin (<@%s>) can change where I announce releases.", admin)
+	}
+	if strings.Contains(strings.ToLower(text), "stop") {
+		if err := r.Store.Tx(ctx, func(tx store.Tx) error {
+			return tx.SetSetting(store.SettingMgmtChannel, "")
+		}); err != nil {
+			return "couldn't save: " + err.Error()
+		}
+		return "Okay — I'll stop announcing releases to a channel. (Upgrade prompts still go to the upgrade admin.)"
+	}
+	m := slackChannelRef.FindStringSubmatch(text)
+	if m == nil {
+		return "Which channel? DM me `announce releases in #channel` (type the # so Slack links it)."
+	}
+	if err := r.Store.Tx(ctx, func(tx store.Tx) error {
+		return tx.SetSetting(store.SettingMgmtChannel, m[1])
+	}); err != nil {
+		return "couldn't save: " + err.Error()
+	}
+	return fmt.Sprintf("Got it — I'll announce new kube-claw releases and upgrade events in <#%s>. Make sure I'm a member of it (`/invite`), or the posts will fail.", m[1])
+}
+
+// HandleDM handles a direct message to the bot: secret registration
+// ("register secret <name> [description]" mints a one-time intake link with
+// the DMing user as granter) and management-channel setup ("announce releases
+// in #channel"). Returns the reply text.
 func (r *Router) HandleDM(ctx context.Context, userID, text string) string {
 	low := strings.ToLower(text)
+	if strings.Contains(low, "announc") && strings.Contains(low, "release") {
+		return r.handleAnnounceCommand(ctx, userID, text)
+	}
 	if !strings.Contains(low, "register") || !strings.Contains(low, "secret") {
-		return "Hi! DM me `register secret <name> [description]` and I'll send a one-time link to add the value — you'll be set as its approver."
+		return "Hi! DM me `register secret <name> [description]` and I'll send a one-time link to add the value — you'll be set as its approver.\nYou can also DM `announce releases in #channel` to set a management channel for release announcements."
 	}
 	if r.Secrets == nil {
 		return "secret registration isn't configured on this controller"
