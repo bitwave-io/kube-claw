@@ -15,7 +15,8 @@
 #
 # Override the images (e.g. a private mirror or a custom build). With a custom
 # registry, self-update degrades to notify-only unless you also publish your own
-# release manifest and set updates.manifestURL (DESIGN.md §24.3):
+# release manifest and set updates.manifestURL + updates.manifestPublicKey —
+# your own channel needs your own signing key (docs/release-signing.md):
 #   IMAGE_REPO=docker.io/myorg/claw-controller \
 #   RUNNER_REPO=docker.io/myorg/claw-runner \
 #   SUPERVISOR_REPO=docker.io/myorg/claw-supervisor \
@@ -165,5 +166,14 @@ echo "Reach the admin UI:"
 echo "  kubectl -n $NS port-forward svc/claw-controller 8090:8090"
 echo "  open http://localhost:8090/ui"
 echo
-echo "If you enabled Slack, add the bot to a channel — it DMs the inviter to set"
-echo "up routing. See the README 'Slack app setup' section for required scopes."
+echo "If you enabled Slack, add the bot to a channel — it works immediately"
+echo "(@-mentions, replies in threads) and DMs the inviter to offer other modes."
+echo "See the README 'Slack app setup' section for required scopes."
+if [[ "$UPDATES_MODE" == "prompt" ]]; then
+  echo
+  echo "Self-updates (prompt mode): release manifests are signature-verified"
+  echo "(docs/release-signing.md). To receive upgrade prompts, claim the upgrade"
+  echo "admin role — the bot offers a 'Make me the upgrade admin' button when it"
+  echo "onboards a channel (or set it in the admin UI under Settings). Optionally"
+  echo "DM the bot 'announce releases in #channel' for team-visible announcements."
+fi
