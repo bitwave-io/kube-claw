@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -348,11 +349,39 @@ func newAgentSession(systemPrompt string) *agentSession {
 			Required: []string{"title"},
 		},
 	}
+	registerSecretTool := anthropic.ToolParam{
+		Name: "register_secret",
+		Description: anthropic.String("Create a NEW named secret in kube-claw and get a ONE-TIME intake link where the user " +
+			"pastes the value themselves — you and the chat never see it. The user you're talking to becomes the secret's " +
+			"approver. Use when someone wants to hand kube-claw a credential to keep (API tokens, deploy keys). Reply with the " +
+			"link and note it is one-time. (Distinct from request_secret, which asks to USE an existing secret in this run.)"),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"name":        map[string]any{"type": "string", "description": "secret name, e.g. gcp-billing-readonly (lowercase, dashes)"},
+				"description": map[string]any{"type": "string", "description": "what the secret is and what it will be used for"},
+			},
+			Required: []string{"name"},
+		},
+	}
+	announceChanTool := anthropic.ToolParam{
+		Name: "set_release_announce_channel",
+		Description: anthropic.String("Set (or clear) the management channel where kube-claw announces new releases and upgrade " +
+			"events (available/applied/rolled back). Pass the Slack channel ID: when the user names a channel like #ops, the " +
+			"message text carries it encoded as <#C0123ABCD|ops> — use the C… id inside. Pass an empty channel to stop " +
+			"announcements. Only the upgrade admin may change this; remind the user the bot must be invited to the channel."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"channel": map[string]any{"type": "string", "description": "Slack channel id (C…), or \"\" to stop announcing"},
+			},
+			Required: []string{"channel"},
+		},
+	}
 	return &agentSession{
-		client:        anthropic.NewClient(), // reads ANTHROPIC_API_KEY
-		model:         model,
-		sys:           sys,
-		tools:         []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool}},
+		client: anthropic.NewClient(), // reads ANTHROPIC_API_KEY
+		model:  model,
+		sys:    sys,
+		tools: []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool},
+			{OfTool: &registerSecretTool}, {OfTool: &announceChanTool}},
 		controllerURL: os.Getenv("CLAW_CONTROLLER_URL"),
 		runID:         os.Getenv("CLAW_RUN_ID"),
 		agentName:     os.Getenv("CLAW_AGENT_NAME"),
@@ -538,6 +567,21 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 					_ = json.Unmarshal(raw, &in)
 					s.setStep("Publishing document \"" + in.Title + "\"…")
 					result = s.publishDocument(tctx, in.Title, in.Markdown, in.ArtifactID)
+				case "register_secret":
+					var in struct {
+						Name        string `json:"name"`
+						Description string `json:"description"`
+					}
+					_ = json.Unmarshal(raw, &in)
+					s.setStep("Creating secret " + in.Name + "…")
+					result = s.registerSecret(tctx, in.Name, in.Description)
+				case "set_release_announce_channel":
+					var in struct {
+						Channel string `json:"channel"`
+					}
+					_ = json.Unmarshal(raw, &in)
+					s.setStep("Updating the release announcement channel…")
+					result = s.setAnnounceChannel(tctx, in.Channel)
 				default: // bash
 					var in struct {
 						Command string `json:"command"`
@@ -972,6 +1016,67 @@ func (s *agentSession) publishDocument(ctx context.Context, title, markdown, art
 	return fmt.Sprintf("Published %q.\nShare link: %s\nLink expires: %s\nartifact_id: %s (keep for resharing)\n"+
 		"Give the user the link, tell them exactly when it expires, and that saying \"reshare\" here mints a fresh link.",
 		title, out.URL, expiry, out.ArtifactID)
+}
+
+// registerSecret creates a named secret with the conversation's user as
+// granter and returns the one-time intake link (register_secret tool).
+func (s *agentSession) registerSecret(ctx context.Context, name, description string) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "register_secret is unavailable in this run (no controller binding)."
+	}
+	body, _ := json.Marshal(map[string]string{"name": name, "description": description})
+	url := fmt.Sprintf("%s/v1/runs/%s/register-secret", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodPost, url, body)
+	if err != nil {
+		return "Couldn't register the secret: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "Couldn't register the secret: " + readAPIError(resp)
+	}
+	var out struct{ Name, Granter, URL string }
+	if json.NewDecoder(resp.Body).Decode(&out) != nil || out.URL == "" {
+		return "Couldn't register the secret: unexpected controller response."
+	}
+	return fmt.Sprintf("Secret %q created — <@%s> is its approver.\nOne-time intake link (open it and paste the value; the link dies after one use):\n%s",
+		out.Name, out.Granter, out.URL)
+}
+
+// setAnnounceChannel points release/upgrade announcements at a channel
+// (set_release_announce_channel tool). "" clears it.
+func (s *agentSession) setAnnounceChannel(ctx context.Context, channel string) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "set_release_announce_channel is unavailable in this run (no controller binding)."
+	}
+	body, _ := json.Marshal(map[string]string{"channel": channel})
+	url := fmt.Sprintf("%s/v1/runs/%s/announce-channel", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodPost, url, body)
+	if err != nil {
+		return "Couldn't update the announcement channel: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "Couldn't update the announcement channel: " + readAPIError(resp)
+	}
+	if channel == "" {
+		return "Release announcements to a channel are now OFF (upgrade prompts still go to the upgrade admin)."
+	}
+	return fmt.Sprintf("Done — new kube-claw releases and upgrade events will be announced in <#%s>. Remind the user the bot must be a member of that channel (/invite) or the posts will fail.", channel)
+}
+
+// readAPIError extracts the controller's error message for a tool result.
+func readAPIError(resp *http.Response) string {
+	var out struct {
+		Error string `json:"error"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&out) == nil && out.Error != "" {
+		return out.Error
+	}
+	return "controller returned " + resp.Status
 }
 
 func (s *agentSession) post(ctx context.Context, path string, body []byte) error {

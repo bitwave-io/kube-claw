@@ -135,11 +135,17 @@ func SlackEventTS(source string) string { return slackSource(source).Event }
 // SlackUser extracts the requesting user's Slack id from a run's Source JSON.
 func SlackUser(source string) string { return slackSource(source).User }
 
+// SlackIsDM reports whether the run came from a direct message — its SessionID
+// is the IM channel id (one continuous conversation), NOT a thread ts, so
+// replies must post without thread targeting.
+func SlackIsDM(source string) bool { return slackSource(source).DM }
+
 type slackSrc struct {
 	Trigger string `json:"trigger"`
 	Channel string `json:"channel"`
 	Event   string `json:"event"`
 	User    string `json:"user"`
+	DM      bool   `json:"dm"`
 }
 
 func slackSource(source string) slackSrc {

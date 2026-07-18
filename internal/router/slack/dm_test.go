@@ -120,3 +120,60 @@ func TestAnnounceReleasesDM(t *testing.T) {
 		t.Fatalf("stop failed: reply=%q mgmt=%q", reply, getMgmt())
 	}
 }
+
+// A DM that matches no deterministic command becomes an agent run on installs
+// with an LLM (Classifier) configured — the DM channel is the session and the
+// run is marked dm — while the exact commands stay string-matched. LLM-less
+// installs keep the usage reply.
+func TestConversationalDM(t *testing.T) {
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "claw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// LLM-less: chatter gets the usage reply, never "".
+	bare := &Router{Store: st}
+	if reply := bare.HandleDM(ctx, "U1", "what clusters do we run?"); !strings.Contains(reply, "register secret") {
+		t.Fatalf("LLM-less DM reply = %q, want usage text", reply)
+	}
+
+	// With a Classifier, chatter falls through to conversation…
+	r := &Router{Store: st, DefaultAgent: "general", Classifier: NewClassifier("test-key")}
+	if reply := r.HandleDM(ctx, "U1", "what clusters do we run?"); reply != "" {
+		t.Fatalf("conversational DM reply = %q, want \"\" (fall through to a run)", reply)
+	}
+	// …and the commands stay deterministic.
+	if reply := r.HandleDM(ctx, "U1", "announce releases in <#C0MGMT>"); !strings.Contains(reply, "<#C0MGMT>") {
+		t.Fatalf("command hijacked by conversation: %q", reply)
+	}
+
+	// The conversation run: session = DM channel, dm-marked, deduped.
+	runID, err := r.HandleDMMessage(ctx, "1111.0001", "D0PAT", "<@U1>: what clusters do we run?", "U1")
+	if err != nil || runID == "" {
+		t.Fatalf("HandleDMMessage: run=%q err=%v", runID, err)
+	}
+	runs, err := listSession(ctx, st, "D0PAT")
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("session runs = %d err=%v", len(runs), err)
+	}
+	if !strings.Contains(runs[0].Source, `"dm":true`) || !strings.Contains(runs[0].Source, `"user":"U1"`) {
+		t.Fatalf("run source = %s", runs[0].Source)
+	}
+	if runs[0].AgentName != "general" {
+		t.Fatalf("agent = %q, want the default", runs[0].AgentName)
+	}
+	// Duplicate event → no second run.
+	if dup, err := r.HandleDMMessage(ctx, "1111.0001", "D0PAT", "same again", "U1"); err != nil || dup != "" {
+		t.Fatalf("dedupe failed: run=%q err=%v", dup, err)
+	}
+	// No default agent → no run.
+	noAgent := &Router{Store: st, Classifier: NewClassifier("test-key")}
+	if id, _ := noAgent.HandleDMMessage(ctx, "1111.0002", "D0PAT", "hi", "U1"); id != "" {
+		t.Fatalf("run without any agent = %q", id)
+	}
+}

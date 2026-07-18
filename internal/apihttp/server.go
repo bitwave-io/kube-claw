@@ -18,8 +18,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -99,6 +101,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/outputs", s.postOutput)
 	mux.HandleFunc("POST /v1/runs/{id}/artifacts", s.publishArtifact)
+	mux.HandleFunc("POST /v1/runs/{id}/register-secret", s.agentRegisterSecret)
+	mux.HandleFunc("POST /v1/runs/{id}/announce-channel", s.agentSetAnnounceChannel)
 	mux.HandleFunc("POST /v1/runs/{id}/progress", s.postProgress)
 	mux.HandleFunc("POST /v1/secrets", s.createSecret)
 	mux.HandleFunc("GET /v1/secrets/{name}/metadata", s.secretMetadata)
@@ -406,7 +410,11 @@ func (s *Server) postProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Notifier != nil {
 		if ch := slackrouter.SlackChannel(run.Source); ch != "" {
-			if e := s.Notifier.PostReply(r.Context(), ch, run.SessionID, req.Text); e != nil {
+			sessTS := run.SessionID
+			if slackrouter.SlackIsDM(run.Source) {
+				sessTS = "" // a DM session id is the IM channel, not a thread ts
+			}
+			if e := s.Notifier.PostReply(r.Context(), ch, sessTS, req.Text); e != nil {
 				logf.Log.WithName("apihttp").Error(e, "post slack progress", "run", id)
 			}
 		}
@@ -497,12 +505,16 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 	if s.Notifier != nil {
 		if ch := slackrouter.SlackChannel(run.Source); ch != "" {
 			threadTS := run.SessionID // default: reply in-thread
-			_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
-				if replyTopLevel(tx, run, ch) {
-					threadTS = ""
-				}
-				return nil
-			})
+			if slackrouter.SlackIsDM(run.Source) {
+				threadTS = "" // DM replies post straight to the IM channel
+			} else {
+				_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+					if replyTopLevel(tx, run, ch) {
+						threadTS = ""
+					}
+					return nil
+				})
+			}
 			if e := s.Notifier.PostReply(r.Context(), ch, threadTS, req.Content); e != nil {
 				logf.Log.WithName("apihttp").Error(e, "post slack reply", "run", id)
 			}
@@ -618,6 +630,111 @@ func (s *Server) publishArtifact(w http.ResponseWriter, r *http.Request) {
 		"url":        s.UIBase + "/d/" + pub.Token,
 		"expiresAt":  pub.ExpiresAt.Format(time.RFC3339),
 	})
+}
+
+// agentRegisterSecret is the runner→controller callback behind the agent's
+// register_secret tool — the conversational successor to the deterministic
+// "register secret" DM command (which still works). It creates the secret with
+// the REQUESTING SLACK USER as granter and mints a one-time intake link; the
+// agent (and the controller) never see the value. Slack-originated runs only:
+// the human in the conversation is the authority the grant hangs off.
+func (s *Server) agentRegisterSecret(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.authRunInSession(r, id) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	var req struct{ Name, Description string }
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil || req.Name == "" {
+		writeErr(w, http.StatusBadRequest, "name required")
+		return
+	}
+	var run store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetRun(id)
+		run = got
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	user := slackrouter.SlackUser(run.Source)
+	if user == "" {
+		writeErr(w, http.StatusForbidden, "only Slack-originated runs can register secrets (the requesting user becomes the approver)")
+		return
+	}
+	if s.Secrets == nil {
+		writeErr(w, http.StatusServiceUnavailable, "secret registration isn't configured on this controller")
+		return
+	}
+	const ns = "claw-agents" // parity with the DM command
+	_, _ = s.Secrets.CreateSecret(r.Context(), ns, req.Name, "", req.Description, []string{user})
+	tok, err := s.Secrets.MintIntakeToken(r.Context(), ns, req.Name, "")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"name": req.Name, "granter": user,
+		"url": s.UIBase + "/ui/secret-intake/" + tok,
+	})
+}
+
+// slackChannelID validates an encoded Slack channel id for the
+// announce-channel tool.
+var slackChannelID = regexp.MustCompile(`^C[A-Z0-9]+$`)
+
+// agentSetAnnounceChannel is the runner→controller callback behind the agent's
+// set_release_announce_channel tool. Same authority rule as the DM command:
+// once an upgrade admin is claimed, only the admin may move it.
+func (s *Server) agentSetAnnounceChannel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.authRunInSession(r, id) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	var req struct{ Channel string }
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Channel != "" && !slackChannelID.MatchString(req.Channel) {
+		writeErr(w, http.StatusBadRequest, "not a Slack channel id (want C…; extract it from the <#C…|name> reference)")
+		return
+	}
+	var run store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetRun(id)
+		run = got
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	user := slackrouter.SlackUser(run.Source)
+	if user == "" {
+		writeErr(w, http.StatusForbidden, "only Slack-originated runs can change the management channel")
+		return
+	}
+	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		admin, e := tx.GetSetting(store.SettingUpgradeAdmin)
+		if e != nil && !errors.Is(e, store.ErrNotFound) {
+			return e
+		}
+		if admin != "" && admin != user {
+			return fmt.Errorf("only the upgrade admin (<@%s>) can change where releases are announced", admin)
+		}
+		return tx.SetSetting(store.SettingMgmtChannel, req.Channel)
+	})
+	if err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	status := "set"
+	if req.Channel == "" {
+		status = "cleared"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": status, "channel": req.Channel})
 }
 
 // --- secrets (Phase 3) ---
