@@ -1,0 +1,57 @@
+# The ControlPlane CR: Helm-owned POLICY for the self-update plane (DESIGN.md
+# §24.2). Helm renders ONLY spec — approvals live in annotations written by the
+# controller, and runtime state in status written by the supervisor; Helm's
+# three-way merge preserves both across upgrades. That split is load-bearing:
+# do not template annotations or status here.
+apiVersion: claw.run/v1alpha1
+kind: ControlPlane
+metadata:
+  name: claw
+  labels:
+    app.kubernetes.io/name: claw-supervisor
+spec:
+  updates:
+    mode: {{ .Values.updates.mode }}
+    channel: {{ .Values.updates.channel }}
+    {{- with .Values.updates.manifestURL }}
+    manifestURL: {{ . | quote }}
+    {{- end }}
+    checkInterval: {{ .Values.updates.checkInterval }}
+    confirmDeadline: {{ .Values.updates.confirmDeadline }}
+  version: {{ .Values.version | quote }}
+  image:
+    controllerRepository: {{ .Values.image.repository }}
+    runnerRepository: {{ .Values.image.runnerRepository }}
+    pullPolicy: {{ .Values.image.pullPolicy }}
+  controller:
+    replicas: {{ .Values.controller.replicas }}
+    dataDir: {{ .Values.controller.dataDir }}
+    enableRouter: {{ .Values.controller.enableRouter }}
+    logFormat: {{ .Values.controller.logFormat }}
+    selfURL: {{ .Values.controller.selfURL }}
+    uiBaseURL: {{ .Values.controller.uiBaseURL }}
+    adminSecretName: {{ .Values.controller.adminSecretName }}
+    restrictAgentEgress: {{ .Values.controller.restrictAgentEgress }}
+    {{- with .Values.controller.artifacts }}
+    artifacts:
+      ttl: {{ .ttl }}
+      maxTTL: {{ .maxTTL }}
+    {{- end }}
+    resources:
+      {{- toYaml .Values.controller.resources | nindent 6 }}
+    storage:
+      size: {{ .Values.controller.storage.size }}
+      {{- with .Values.controller.storage.storageClassName }}
+      storageClassName: {{ . | quote }}
+      {{- end }}
+  slack:
+    enabled: {{ .Values.slack.enabled }}
+    tokenSecretName: {{ .Values.slack.tokenSecretName }}
+    {{- with .Values.slack.routes }}
+    routesJSON: {{ toJson . | quote }}
+    {{- end }}
+  service:
+    apiPort: {{ .Values.service.apiPort }}
+    metricsPort: {{ .Values.service.metricsPort }}
+    probePort: {{ .Values.service.probePort }}
+    uiPort: {{ .Values.service.uiPort }}

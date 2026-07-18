@@ -209,6 +209,16 @@ type Tx interface {
 	// SetGitRepoRequestStatus updates a request's status.
 	SetGitRepoRequestStatus(id, status string) error
 
+	// --- install-wide settings (key/value, DESIGN.md §24.6) ---
+
+	// SetSetting creates or replaces a setting.
+	SetSetting(key, value string) error
+	// GetSetting returns a setting's value, or ErrNotFound.
+	GetSetting(key string) (string, error)
+	// SetSettingIfUnset stores a setting only when the key has no value yet
+	// (first-claim-wins). Returns true if this call set it.
+	SetSettingIfUnset(key, value string) (bool, error)
+
 	// --- artifacts (shareable documents, e.g. design docs) ---
 
 	// CreateArtifact stores a published document (immutable once written).
@@ -236,6 +246,23 @@ type Tx interface {
 	// DeleteSchedule removes a schedule.
 	DeleteSchedule(id string) error
 }
+
+// Well-known settings keys (the settings table is a KV; these are the keys the
+// control plane itself uses — the self-update plane, DESIGN.md §24).
+const (
+	// SettingUpgradeAdmin is the Slack user id asked to approve upgrades.
+	// Claimed at onboarding (first-claim-wins) or set via `claw settings set`.
+	SettingUpgradeAdmin = "upgrade_admin_slack_user"
+	// SettingSkippedVersion is a release version the admin chose to skip;
+	// it is never re-prompted.
+	SettingSkippedVersion = "upgrade_skipped_version"
+	// SettingNotifiedVersion is the last availableVersion announced in Slack,
+	// so detection doesn't re-DM on every poll.
+	SettingNotifiedVersion = "upgrade_notified_version"
+	// SettingRemindAfter is an RFC3339 time before which the upgrade prompt is
+	// suppressed ("Remind me later").
+	SettingRemindAfter = "upgrade_remind_after"
+)
 
 // Schedule is a cron-triggered agent invocation: at each cron occurrence the
 // scheduler creates a run for the agent with Prompt as input and posts the answer

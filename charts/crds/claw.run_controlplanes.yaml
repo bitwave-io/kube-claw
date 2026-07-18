@@ -1,0 +1,432 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: controlplanes.claw.run
+spec:
+  group: claw.run
+  names:
+    kind: ControlPlane
+    listKind: ControlPlaneList
+    plural: controlplanes
+    shortNames:
+    - cp
+    singular: controlplane
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.runningVersion
+      name: Running
+      type: string
+    - jsonPath: .status.availableVersion
+      name: Available
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.updates.mode
+      name: Mode
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ControlPlane is the self-update plane's coordination resource
+          (DESIGN.md §24).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ControlPlaneSpec is Helm-owned policy: which release stream to follow, who
+              may move the version, and the controller deployment knobs (transcribed from
+              values.yaml — the supervisor renders the controller StatefulSet from these).
+            properties:
+              controller:
+                description: Controller carries the controller StatefulSet knobs (values
+                  passthrough).
+                properties:
+                  adminSecretName:
+                    default: claw-admin
+                    description: AdminSecretName holds the admin dashboard basic-auth
+                      password.
+                    type: string
+                  artifacts:
+                    description: Artifacts configures shareable-document link lifetimes.
+                    properties:
+                      maxTTL:
+                        default: 168h
+                        description: MaxTTL caps per-publish lifetime overrides.
+                        type: string
+                      ttl:
+                        default: 24h
+                        description: TTL is the default share-link lifetime (Go duration,
+                          e.g. "24h").
+                        type: string
+                    type: object
+                  dataDir:
+                    default: /var/lib/claw
+                    type: string
+                  enableRouter:
+                    type: boolean
+                  logFormat:
+                    default: console
+                    enum:
+                    - console
+                    - json
+                    type: string
+                  replicas:
+                    default: 1
+                    format: int32
+                    type: integer
+                  resources:
+                    description: Resources for the controller container.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  restrictAgentEgress:
+                    description: RestrictAgentEgress opts into the deny-east/west
+                      agent NetworkPolicy.
+                    type: boolean
+                  selfURL:
+                    description: SelfURL is the in-cluster URL run pods use to reach
+                      the controller.
+                    type: string
+                  storage:
+                    description: |-
+                      Storage sizes the controller's data PVC (volumeClaimTemplate — immutable
+                      after creation, like any StatefulSet volumeClaimTemplate).
+                    properties:
+                      size:
+                        default: 20Gi
+                        type: string
+                      storageClassName:
+                        type: string
+                    type: object
+                  uiBaseURL:
+                    description: UIBaseURL is the public base URL of the secret-intake
+                      UI.
+                    type: string
+                type: object
+              image:
+                description: |-
+                  Image is where release images live. Digest-pinned refs from the release
+                  manifest override tag derivation for self-applied updates.
+                properties:
+                  controllerRepository:
+                    default: docker.io/bitwavecode/kube-claw-controller
+                    description: ControllerRepository is the controller image repository
+                      (no tag).
+                    type: string
+                  pullPolicy:
+                    default: IfNotPresent
+                    description: PullPolicy for the controller pod.
+                    type: string
+                  runnerRepository:
+                    default: docker.io/bitwavecode/kube-claw-runner
+                    description: RunnerRepository is the runner image repository (no
+                      tag).
+                    type: string
+                type: object
+              service:
+                description: |-
+                  Service mirrors the chart's service ports (the Service object itself
+                  stays Helm-rendered; the StatefulSet's containerPorts must match it).
+                properties:
+                  apiPort:
+                    default: 8443
+                    format: int32
+                    type: integer
+                  metricsPort:
+                    default: 8080
+                    format: int32
+                    type: integer
+                  probePort:
+                    default: 8081
+                    format: int32
+                    type: integer
+                  uiPort:
+                    default: 8090
+                    format: int32
+                    type: integer
+                type: object
+              slack:
+                description: Slack mirrors the chart's slack.* values (token secret
+                  + static routes).
+                properties:
+                  enabled:
+                    type: boolean
+                  routesJSON:
+                    description: RoutesJSON is the optional static channel→agent routing
+                      (CLAW_SLACK_ROUTES).
+                    type: string
+                  tokenSecretName:
+                    default: claw-slack-tokens
+                    type: string
+                type: object
+              updates:
+                description: Updates configures the self-update plane.
+                properties:
+                  channel:
+                    default: stable
+                    description: Channel is the release stream to follow.
+                    type: string
+                  checkInterval:
+                    default: 6h
+                    description: CheckInterval is how often the supervisor polls the
+                      release manifest.
+                    type: string
+                  confirmDeadline:
+                    default: 10m
+                    description: |-
+                      ConfirmDeadline is how long the watchdog waits for the new controller to
+                      confirm startup (status.runningVersion) before rolling back (§24.5).
+                    type: string
+                  manifestURL:
+                    description: |-
+                      ManifestURL overrides the per-channel release manifest URL (required for
+                      custom registries — DESIGN.md §24.3).
+                    type: string
+                  mode:
+                    default: prompt
+                    description: Mode is who may move the desired version (DESIGN.md
+                      §24.4).
+                    enum:
+                    - prompt
+                    - auto
+                    - manual
+                    type: string
+                type: object
+              version:
+                description: |-
+                  Version is the Helm-pinned release floor — the image tag deployed at
+                  install and the version `helm upgrade` moves. In prompt/auto modes the
+                  effective version is semver-max(version, approved annotation); in manual
+                  mode this field alone decides (DESIGN.md §24.2).
+                type: string
+            required:
+            - version
+            type: object
+          status:
+            description: |-
+              ControlPlaneStatus is runtime state. The supervisor owns everything except
+              RunningVersion, which the CONTROLLER writes after boot-complete (migrations
+              ran, store open, Slack connected when enabled) — that write IS the
+              startup-confirmed signal the watchdog waits on (DESIGN.md §24.5).
+            properties:
+              availableContainsMigration:
+                description: AvailableContainsMigration mirrors the manifest's migration
+                  flag.
+                type: boolean
+              availableControllerImage:
+                description: |-
+                  AvailableControllerImage / AvailableRunnerImage are the digest-pinned
+                  refs from the manifest — an approval copies them into the annotations.
+                type: string
+              availableNotes:
+                description: AvailableNotes is the release's human summary (used in
+                  the Slack prompt).
+                type: string
+              availableRequiresHelm:
+                description: |-
+                  AvailableRequiresHelm is true when the release can't be self-applied
+                  (requiresHelmUpgrade / minSupervisorVersion / custom registry) — the
+                  prompt degrades to notify-only in every mode (DESIGN.md §24.3).
+                type: boolean
+              availableRequiresHelmReason:
+                description: AvailableRequiresHelmReason says why (for the Slack message).
+                type: string
+              availableRunnerImage:
+                type: string
+              availableVersion:
+                description: AvailableVersion is the newest release the manifest offers
+                  (poller).
+                type: string
+              conditions:
+                description: Conditions follow the standard Kubernetes condition convention.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastCheckTime:
+                description: LastCheckTime is when the manifest was last polled successfully.
+                format: date-time
+                type: string
+              lastRollback:
+                description: LastRollback describes the most recent automatic rollback.
+                properties:
+                  at:
+                    format: date-time
+                    type: string
+                  from:
+                    type: string
+                  reason:
+                    type: string
+                  to:
+                    type: string
+                type: object
+              phase:
+                description: Phase is the update lifecycle phase (Idle/Updating/RollingBack/Degraded).
+                type: string
+              previousControllerImage:
+                description: |-
+                  PreviousControllerImage / PreviousRunnerImage are the rollback target,
+                  recorded (not re-resolved) before each apply.
+                type: string
+              previousRunnerImage:
+                type: string
+              previousVersion:
+                description: PreviousVersion is the version the Previous* images ran.
+                type: string
+              runningControllerImage:
+                description: |-
+                  RunningControllerImage / RunningRunnerImage are the image refs the
+                  supervisor most recently applied (tag- or digest-pinned).
+                type: string
+              runningRunnerImage:
+                type: string
+              runningVersion:
+                description: RunningVersion is the release version the controller
+                  confirmed at boot.
+                type: string
+              updateContainsMigration:
+                description: UpdateContainsMigration disables auto-rollback for this
+                  update (§24.5).
+                type: boolean
+              updateStartedAt:
+                description: UpdateStartedAt starts the watchdog's confirm deadline.
+                format: date-time
+                type: string
+              updateTarget:
+                description: UpdateTarget is the version currently being applied (phase=Updating).
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

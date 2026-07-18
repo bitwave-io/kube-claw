@@ -40,6 +40,8 @@ import (
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
 	"github.com/traego/kube-claw/internal/store/sqlite"
+	"github.com/traego/kube-claw/internal/upgrade"
+	"github.com/traego/kube-claw/internal/version"
 )
 
 var scheme = runtime.NewScheme()
@@ -95,6 +97,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Pre-migration snapshot (DESIGN.md §24.5): when this boot's version differs
+	// from the one that last migrated, copy the DB first — the PVC-local restore
+	// point for a failed migration release. Taken before Open (quiesced file).
+	if snap, err := sqlite.SnapshotBeforeMigrate(dataDir, "claw.db", version.Get()); err != nil {
+		log.Error(err, "unable to snapshot store before migration")
+		os.Exit(1)
+	} else if snap != "" {
+		log.Info("snapshotted store before migration", "snapshot", snap)
+	}
+
 	// Open the SQLite store on the PVC and migrate.
 	st, err := sqlite.Open(context.Background(), filepath.Join(dataDir, "claw.db"))
 	if err != nil {
@@ -104,6 +116,10 @@ func main() {
 	defer st.Close()
 	if err := st.Migrate(context.Background()); err != nil {
 		log.Error(err, "unable to migrate store")
+		os.Exit(1)
+	}
+	if err := sqlite.WriteVersionMarker(dataDir, version.Get()); err != nil {
+		log.Error(err, "unable to write version marker")
 		os.Exit(1)
 	}
 
@@ -179,6 +195,31 @@ func main() {
 		log.Info("slack router configured", "routes", len(routes), "defaultAgent", defaultAgent)
 	}
 
+	// Self-update coordinator (DESIGN.md §24): runs when the supervisor deployed
+	// us with a ControlPlane reference. Writes the startup-confirmed signal,
+	// conducts the Slack upgrade conversation, applies approvals.
+	var upgradeCoord *upgrade.Coordinator
+	if cpName := os.Getenv("CLAW_CONTROLPLANE_NAME"); cpName != "" {
+		upgradeCoord = &upgrade.Coordinator{
+			Store:     st,
+			Reader:    mgr.GetAPIReader(),
+			Writer:    mgr.GetClient(),
+			Name:      cpName,
+			Namespace: envOr("CLAW_CONTROLPLANE_NAMESPACE", "claw-system"),
+		}
+		if slackNotifier != nil {
+			upgradeCoord.Notifier = slackNotifier
+		}
+		if err := mgr.Add(upgradeCoord); err != nil {
+			log.Error(err, "unable to add upgrade coordinator")
+			os.Exit(1)
+		}
+		if slackRt != nil {
+			slackRt.Upgrades = upgradeCoord
+		}
+		log.Info("self-update coordinator enabled", "controlplane", cpName)
+	}
+
 	// HTTP API (uncached reader so /v1/agents works without waiting on caches).
 	if err := mgr.Add(&apihttp.Server{
 		Addr:                  apiAddr,
@@ -196,6 +237,7 @@ func main() {
 		Notifier:              slackNotifier,
 		AdminPassword:         os.Getenv("CLAW_ADMIN_PASSWORD"),
 		EnableFakeSlackEvents: os.Getenv("CLAW_ENABLE_FAKE_SLACK") == "true",
+		Upgrades:              upgradeOrNil(upgradeCoord),
 	}); err != nil {
 		log.Error(err, "unable to add HTTP API server")
 		os.Exit(1)
@@ -278,7 +320,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info("starting claw-controller")
+	log.Info("starting claw-controller", "version", version.Get())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "manager exited with error")
 		os.Exit(1)
@@ -457,4 +499,20 @@ func parseImageOverrides(s string) map[string]string {
 		}
 	}
 	return out
+}
+
+// envOr returns the env var's value, or def when unset/empty.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// upgradeOrNil avoids handing the API server a typed-nil interface.
+func upgradeOrNil(c *upgrade.Coordinator) apihttp.UpgradeAPI {
+	if c == nil {
+		return nil
+	}
+	return c
 }

@@ -1,13 +1,56 @@
 image:
   repository: docker.io/bitwavecode/kube-claw-controller
-  # Pin to an immutable release tag (NOT :latest). :latest makes upgrades
-  # non-deterministic — same tag => no pod spec change => `helm upgrade` won't
-  # roll new code, and `helm rollback` can't restore a prior image. CI publishes
-  # <semver> (docker/metadata-action strips the leading v from the git tag) and
-  # sha-<commit> tags; bump this in lockstep with Chart.yaml appVersion.
-  # Quickstart users can override to :latest if desired.
-  tag: "0.3.4"
+  runnerRepository: docker.io/bitwavecode/kube-claw-runner
   pullPolicy: IfNotPresent
+
+# The release version deployed at install — an immutable image tag, NEVER
+# :latest (self-update compares semver; a mutable tag makes "new version
+# detected" meaningless). This is the Helm-pinned floor: `helm upgrade` moves
+# it, and in prompt/auto modes the self-update plane may move the RUNNING
+# version past it (DESIGN.md §24.2). Bump in lockstep with Chart.yaml appVersion.
+version: "0.4.0"
+
+# Self-update policy (DESIGN.md §24.4), rendered into the ControlPlane CR:
+#   prompt — new releases are offered to the upgrade admin in Slack; the
+#            supervisor applies on approval. The default.
+#   auto   — releases apply unprompted (digest-pinned, health-watched).
+#   manual — only `helm upgrade` moves the version; releases are announced only.
+# In every mode a release flagged requiresHelmUpgrade degrades to notify-only.
+updates:
+  mode: prompt
+  channel: stable
+  # Override for custom registries / air-gapped installs (defaults to the
+  # kube-claw GitHub releases manifest for the channel).
+  manifestURL: ""
+  # Manifest signing (T-9): a PEM ed25519 public key. When set, the supervisor
+  # REQUIRES a valid detached signature at <manifestURL>.sig and rejects the
+  # manifest otherwise (fail closed) — the trust anchor lives here in values,
+  # never on the manifest host. Empty = unsigned mode. Generate a keypair with:
+  #   openssl genpkey -algorithm ed25519 -out manifest-signing.key
+  #   openssl pkey -in manifest-signing.key -pubout   # → paste here
+  # and store manifest-signing.key as the MANIFEST_SIGNING_KEY GitHub secret so
+  # CI signs each release's manifest.
+  manifestPublicKey: ""
+  checkInterval: 6h
+  # How long the supervisor waits for a new version to confirm startup before
+  # rolling back (§24.5).
+  confirmDeadline: 10m
+
+# The supervisor (self-update plane): tiny, always-running, owns the controller
+# StatefulSet. Its tag intentionally defaults to `version` but is pinned
+# independently — the supervisor is the fixed point that survives updates and
+# only moves on `helm upgrade`.
+supervisor:
+  repository: docker.io/bitwavecode/kube-claw-supervisor
+  tag: ""
+  pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
 
 # Namespace agents live in. Created by the deploy script (scripts/deploy-gke.sh /
 # install.sh) before the chart is installed; the controller seeds a default Agent
@@ -32,9 +75,9 @@ controller:
   # or "json" (structured — set in cloud overlays so the log backend parses
   # severity/message into queryable fields). See values-gke.yaml.
   logFormat: console
-  # Image the run engine launches for each run Job (DESIGN.md §11). Pinned to the
-  # same release tag as the controller (see image.tag note re: :latest).
-  runnerImage: docker.io/bitwavecode/kube-claw-runner:0.3.4
+  # NOTE: the runner image is no longer set here — it is derived from
+  # image.runnerRepository + version (or the digest-pinned manifest ref on a
+  # self-applied update) so controller and runner move in lockstep (§24.5).
   # Admin dashboard (/ui) basic-auth password is read from this Secret (key
   # "password", user "admin"). Absent secret/key => the admin UI is unauthenticated.
   # scripts/install.sh creates it; create out-of-band otherwise.

@@ -138,6 +138,8 @@ Controller is a StatefulSet, `replicas: 1`, `volumeClaimTemplate` for `/var/lib/
 
 > **Blast radius (accepted for MVP):** single replica + SQLite on RWO PVC is a deliberate SPOF. Controller down ⇒ all runs blocked (fail-closed for secrets, by design). Recovery story: StatefulSet reschedules, PVC reattaches (RWO same-node or after detach). HA deferred.
 
+> **Superseded post-MVP by §24 (self-update plane):** from chart ≥0.4.0 the chart no longer templates the controller StatefulSet directly — it installs `claw-supervisor`, which owns and reconciles it. This section describes the MVP as built (chart ≤0.3.x).
+
 ---
 
 ## 6. The Agent CRD (the only CRD)
@@ -769,6 +771,337 @@ Logs: structured JSON with run/agent/namespace/request/grant IDs. Never secret v
 8. Every major action is visible through status, CLI, logs, or audit.
 9. kube-claw targets **any** Kubernetes, not just GKE. Raw-secret delivery exists precisely because identity federation (e.g. Workload Identity) is not universally available — so the secret authority earns its keep even when delivering a GCP key.
 10. Agent identity is first-class and pluggable: the runner authenticates with a scoped, claw-issued session token, never the raw platform credential, and the credential verifier can be swapped for an external identity source.
+
+---
+
+## 24. Self-update plane (`claw-supervisor`)
+
+_(Designed 2026-07-16, post-MVP. Nothing here blocks Phase 7. Implementation is
+tracked as Phases 8a–8e below / TODOS T-8.)_
+
+> **Status (2026-07-16): Phases 8a–8e + T-9 implemented and LIVE-TESTED** —
+> `cmd/claw-supervisor` + `internal/supervisor`, `internal/upgrade`, the
+> ControlPlane CRD, chart 0.4.0, ed25519 manifest signing, CI publishing, and
+> unit + envtest coverage. The k3d e2e (`scripts/e2e-selfupdate-k3d.sh`, also a
+> CI job on main/dispatch) passed 24/24: ≤0.3.x chart adoption with PVC/data
+> survival, signed auto-upgrade, tampered-manifest rejection, and broken-release
+> auto-rollback. The e2e caught two real bugs, both fixed: (1) k8s's
+> forced-rollback caveat — a reverted StatefulSet template does not replace a
+> never-Ready pod, so the supervisor deletes stuck pods after a revert; (2)
+> clearing a failed approval regressed desired state to the Helm floor and
+> silently DOWNGRADED past the rollback target — rollback now re-points the
+> approval annotations at the rollback target (`approvedBy: rollback`).
+
+### 24.1 Problem & shape
+
+kube-claw should detect new releases, ask a human in Slack for permission,
+apply the update itself, and roll back if the new version is unhealthy. A
+controller that patches its own StatefulSet cannot roll itself back — **whatever
+performs the update must survive it.**
+
+So: the supervisor pattern (the k3s `system-upgrade-controller` / OLM shape).
+Helm installs a tiny, boring, always-running **`claw-supervisor`** that owns the
+controller's lifecycle; the controller keeps every interesting feature.
+
+> **Naming:** not "claw-base" — *base* already means agent **base image**
+> (`claw baseimage`, the registry, the UI tab). The supervisor is a different
+> concept and gets a non-colliding name.
+
+```text
+helm chart (rarely changes)             claw-supervisor (Deployment, tiny)
+  CRDs (agents + controlplanes)           reconciles the ControlPlane CR:
+  claw-supervisor Deployment       ──▶      · renders/patches the controller StatefulSet
+  static SA/RBAC (both planes)              · polls the release manifest
+  Secrets wiring                            · health-watches rollouts, rolls back
+  ControlPlane CR (policy)                  · bare chat.postMessage on failure
+                                                     │ owns
+                                                     ▼
+                                          claw-controller StatefulSet
+                                          (Slack, router, secret authority — all of today)
+```
+
+Division of labor — the supervisor's value is being **too boring to break**:
+
+- **supervisor:** reconcile + watchdog only. No socket mode, no LLM, no store,
+  no Tink key, no secret-authority powers. Its only Slack capability is one
+  plain `chat.postMessage` HTTPS call (bot token read from the existing Secret)
+  to report a failed/rolled-back update when the controller is down.
+- **controller:** watches the ControlPlane CR it runs under; conducts the Slack
+  conversation (upgrade prompt + approve/skip buttons — the same §8.1
+  interaction machinery as secret grants); writes approvals back to the CR;
+  posts "upgraded ✅" after it boots into the new version.
+
+### 24.2 The `ControlPlane` CRD
+
+A second CRD kind, singleton named `claw` in the release namespace, created by
+the chart. `Agent` (§6) remains the only **user-facing** resource; ControlPlane
+is operator infrastructure — humans normally touch it only through Helm values.
+
+```yaml
+apiVersion: claw.run/v1alpha1
+kind: ControlPlane
+metadata:
+  name: claw
+  annotations:
+    # Written by the CONTROLLER on Slack approval. Never templated by Helm,
+    # so `helm upgrade`'s three-way merge preserves them.
+    claw.run/approved-version: v0.4.0
+    claw.run/approved-controller-digest: sha256:…
+    claw.run/approved-runner-digest: sha256:…
+spec:                        # Helm-owned POLICY (rendered from values.yaml)
+  updates:
+    mode: prompt             # prompt | auto | manual
+    channel: stable
+    manifestURL: ""          # optional override; default derived from channel
+    checkInterval: 6h
+  version: v0.4.0            # helm-pinned floor (what install/upgrade deploys)
+  image:
+    controllerRepository: docker.io/bitwavecode/kube-claw-controller
+    runnerRepository: docker.io/bitwavecode/kube-claw-runner
+  controller: {…}             # passthrough of today's controller.* values (args/env/resources)
+status:                      # STATE (supervisor + controller, via /status)
+  runningVersion: v0.3.1     # written by the CONTROLLER after boot-complete → the
+  runningControllerDigest: … #   startup-confirmed signal the watchdog waits on
+  availableVersion: v0.4.0
+  lastCheckTime: "…"
+  previousControllerDigest: …  # rollback target, recorded before each apply
+  previousRunnerDigest: …
+  phase: Idle | Updating | RollingBack | Degraded
+  lastRollback: {from: …, to: …, reason: …, at: …}
+  conditions: […]
+```
+
+**Policy/state split is the load-bearing decision:** `spec` is Helm's (a
+`helm upgrade` may rewrite it wholesale); approvals live in annotations and
+runtime truth in `status`, which Helm never touches — so upgrades and the
+updater never fight.
+
+**Desired-version resolution (supervisor):**
+
+```text
+mode == manual:        desired = spec.version
+mode == prompt|auto:   desired = semver-max(spec.version, approved-version annotation)
+```
+
+Helm can always move forward past an approval; a stale spec can't revert one
+(max). An explicit **downgrade** is: manual mode + helm (or clear the
+annotations) — never automatic.
+
+**Tag vs digest (deliberate asymmetry):** helm-pinned versions deploy by tag
+(`repository:vX.Y.Z`, exactly like today); self-update deploys by the
+**digest** from the manifest, pinned into the approval annotation — what the
+admin approved is byte-for-byte what runs, no tag-swap TOCTOU.
+
+### 24.3 The release manifest
+
+Published by the release pipeline as a GitHub Release asset plus a stable
+per-channel URL. One HTTPS GET — the supervisor never needs a registry API.
+
+```json
+{
+  "schemaVersion": 1,
+  "channel": "stable",
+  "version": "v0.4.0",
+  "releasedAt": "2026-07-16T00:00:00Z",
+  "images": {
+    "controller": "docker.io/bitwavecode/kube-claw-controller@sha256:…",
+    "runner":     "docker.io/bitwavecode/kube-claw-runner@sha256:…"
+  },
+  "minSupervisorVersion": "v0.1.0",
+  "requiresHelmUpgrade": false,
+  "containsMigration": true,
+  "notes": "one-paragraph human summary — used verbatim in the Slack prompt"
+}
+```
+
+Rules:
+
+- `requiresHelmUpgrade: true` **or** `minSupervisorVersion` > running
+  supervisor ⇒ the release is **notify-only in every mode**: the Slack message
+  says "run `./scripts/install.sh`", and there is no Upgrade button. The mode
+  setting cannot override this. (Chart/RBAC/CRD changes, or a new StatefulSet
+  shape needing a newer embedded template, are by definition helm-level.)
+- `containsMigration: true` ⇒ the watchdog will not auto-roll-back (§24.5) and
+  the prompt says so.
+- **Custom registries** (`IMAGE_REPO=…` installs): Docker Hub digests are
+  meaningless there — the supervisor forces manual behavior and sets a status
+  condition, unless the operator points `manifestURL` at their own manifest.
+- Manifest **signing** (T-9, implemented): a detached **ed25519** signature
+  over the exact manifest bytes at `<manifestURL>.sig`. CI signs with the
+  `MANIFEST_SIGNING_KEY` repo secret; installs pin the PEM public key via the
+  `updates.manifestPublicKey` value (→ `CLAW_MANIFEST_PUBKEY`). With a key
+  configured the supervisor **fails closed** — a missing or invalid signature
+  rejects the manifest. The trust anchor deliberately lives in Helm values,
+  never on the manifest host. Without a key: unsigned mode (HTTPS + the
+  chart-pinned URL, the pre-T-9 posture).
+
+### 24.4 Update modes
+
+`values.yaml → spec.updates.mode`; `install.sh` gains one question
+("Self-update mode? [prompt/auto/manual]") next to the existing token prompts.
+
+- **prompt** (default): on a newer manifest version the controller DMs the
+  upgrade admin — version, release notes, migration warning if any, and
+  **[Upgrade] [Skip this version] [Remind me later]**. Approve → controller
+  writes the approval annotations → supervisor applies. Skip is recorded in the
+  store; that version never re-prompts.
+- **auto**: the supervisor applies new releases unprompted (still
+  digest-pinned, still health-watched); the controller posts
+  "upgraded ✅ v0.3.1 → v0.4.0" after boot.
+- **manual**: only `spec.version` moves the install — helm is the sole
+  actuator. New releases are still *announced* ("v0.4.0 available; this install
+  is helm-managed") — detection is cheap and silence isn't a feature.
+
+The mode decides **who may move the desired version — nothing else**. The
+reconcile / watchdog / rollback path is identical in all three, which is also
+why manual mode still runs through the supervisor: a `helm upgrade` that ships
+a bad image gets the same rollback watchdog as a bad self-update, and the chart
+keeps a single architecture instead of two divergent render paths.
+
+### 24.5 Health watchdog & rollback
+
+Apply procedure (supervisor):
+
+1. Record the currently-running digests into `status.previous*Digest`.
+2. Patch the StatefulSet pod template — controller image **and**
+   `--runner-image` in the same patch, so the pair moves in lockstep.
+3. Wait for **startup-confirmed**, not merely pod-Ready: the new controller
+   writes `status.runningVersion = vNEW` only after migrations ran, the store
+   opened, and (when enabled) Slack connected. Probe-ready alone is not success.
+4. Deadline (default 10m, spec-tunable): no confirmation ⇒ **rollback** — patch
+   back to `previous*Digest` (recorded, not re-resolved), set
+   `status.lastRollback`, hold `phase: Degraded` until the old version
+   confirms, and notify via the supervisor's bare `chat.postMessage`. A
+   crash-looping new image is caught by the same deadline.
+
+**Migration rule:** if the applied release had `containsMigration: true`,
+auto-rollback is disabled — old code on a new schema is worse than staying
+down. The supervisor holds `Degraded` and pages the admin instead. Mitigations
+on the controller side: on boot it snapshots the SQLite file to
+`claw.db.pre-<newVersion>` **before** migrating (PVC-local; doubles as the
+manual restore point), and the standing policy is **additive-only migrations
+within a channel**. Snapshot retention folds into T-2 (GC).
+
+### 24.6 The upgrade admin
+
+Prompt mode needs a durable "who do we ask". New `settings` KV on the `Store`
+(§7), key `upgrade_admin_slack_user`.
+
+- **Capture at onboarding:** the existing channel-onboarding DM (§12) gains one
+  extra question **only while no admin is set**: "Should you be the upgrade
+  admin for this install? [Yes/No]". First-claim-wins, only while unset.
+- **Override:** `claw settings set upgrade-admin U0123` (admin API, basic-auth)
+  and an admin-UI field.
+- **Never claimable via a bare DM command** — any workspace member can DM the
+  bot.
+- **Unset admin + prompt mode:** detection still runs; surfaced as a status
+  condition + admin-UI banner, and the CLI break-glass `claw upgrade approve
+  <version>` works regardless (mirrors `claw secret approve`, §8.1).
+
+### 24.7 Chart, values, RBAC
+
+```text
+charts/
+  crds/claw.run_agents.yaml
+  crds/claw.run_controlplanes.yaml          # NEW (kubectl-applied, like agents)
+  claw/templates/
+    supervisor-deployment.yaml              # NEW — replaces controller-statefulset.yaml
+    controlplane.yaml                       # NEW — policy CR rendered from values
+    rbac.yaml                               # both SAs, still fully static
+    service.yaml / networkpolicy.yaml / ingress.yaml   # unchanged (labels preserved)
+```
+
+- The controller StatefulSet template moves into the supervisor binary
+  (embedded, versioned with it) and is parameterized by `spec.controller`
+  passthrough. Selectors/labels stay identical so Service/NetworkPolicy/Ingress
+  keep working untouched.
+- Values: `updates.{mode,channel,manifestURL}` (new), `controller.version`
+  (replaces `image.tag`); `image.repository`/`RUNNER_IMAGE` overrides kept for
+  custom registries. **The default becomes a pinned release version — `latest`
+  dies here**; self-update is meaningless against a mutable tag.
+- **RBAC stays static in the chart, and the supervisor is deliberately NOT a
+  superset of the controller.** Kubernetes only lets a principal grant
+  permissions it already holds (else `escalate`/`bind`), so a supervisor that
+  managed the controller's SA/RBAC would need all of the controller's powers —
+  defeating the tiny-trusted-thing goal. A release that needs new RBAC sets
+  `requiresHelmUpgrade`.
+  - supervisor SA: `controlplanes`(+status) get/list/watch/update/patch;
+    `apps/statefulsets` (release ns) get/list/watch/create/update/patch; named
+    `secrets` get (bot token); `events` create.
+  - controller SA: today's ClusterRole + `controlplanes`(+status)
+    get/list/watch/update/patch (approval annotations, `runningVersion`).
+
+**Trust note (honest version):** a Slack button — and in auto mode, the
+manifest publisher — can now change the control plane's running code.
+Mitigations: digest-pinned approvals; the admin is a stored setting, not
+DM-claimable; helm-level releases degrade to notify-only; the manifest URL is
+chart-pinned (an attacker needs values access to move it). In **auto** mode a
+compromised manifest endpoint is in-cluster code execution — that residual risk
+is why T-9 (manifest signing) is the designated follow-up, and why `prompt` is
+the default mode. Approval annotations are writable by anyone with CR-update
+rights — i.e. cluster admins, who already own the cluster; acceptable.
+
+### 24.8 Migrating existing installs (chart ≤0.3.x → 0.4.0)
+
+`helm upgrade` to 0.4.0 removes the StatefulSet from Helm's ownership, so Helm
+deletes it. That is survivable **by design**: the data PVC
+(`data-claw-controller-0`) was created by the StatefulSet controller from the
+volumeClaimTemplate — not by Helm — and outlives the deletion. The supervisor
+immediately recreates a StatefulSet with the same name/serviceName, the PVC
+reattaches, SQLite is intact. Cost: one brief control-plane outage, already an
+accepted property of the single-replica design (§5). `install.sh` gains the
+mode prompt; `deploy-secrets.sh` is untouched.
+
+### 24.9 Implementation plan
+
+```text
+Phase 8a  Version identity + settings: ldflags stamping (-X main.version=…) into
+          controller/supervisor/runner, Store settings KV + migration, upgrade-admin
+          capture (onboarding question while unset, `claw settings set upgrade-admin`,
+          admin-UI field).
+          AC: /version + startup log report the stamped version; admin setting survives
+          restart; onboarding offers the claim exactly while unset, never after.
+
+Phase 8b  ControlPlane CRD + supervisor skeleton: CRD gen, cmd/claw-supervisor
+          reconciling the controller StatefulSet from the CR (embedded template),
+          chart 0.4.0 rework (supervisor deployment, controlplane.yaml, static RBAC),
+          ≤0.3.x adoption path.
+          AC: fresh install via supervisor is functionally identical to 0.3.x; helm
+          upgrade from 0.3.x preserves the PVC/data; envtest: CR change rolls the STS.
+
+Phase 8c  Manifest + detection + notify: manifest schema + release-pipeline publishing,
+          poller, status.availableVersion, announce in all modes, notify-only
+          degradation (requiresHelmUpgrade / minSupervisorVersion / custom registry),
+          skip-this-version persistence.
+          AC: stale install → admin DM within checkInterval; requiresHelmUpgrade release
+          shows no Upgrade button; skipped version never re-prompts.
+
+Phase 8d  Approval + apply: prompt-mode buttons (reuse §8.1 interaction machinery),
+          approval annotations, desired-version resolution (semver-max), auto mode,
+          digest-pinned STS patch incl. --runner-image, post-boot "upgraded ✅",
+          `claw upgrade approve` break-glass.
+          AC: button press → manifest's exact digests running; manual mode never
+          self-applies; helm bump past an approval wins (max rule).
+
+Phase 8e  Watchdog + rollback: startup-confirmed signal (controller writes
+          status.runningVersion), deadline rollback to previous*Digest, phase +
+          lastRollback, supervisor bare chat.postMessage on failure, pre-migration
+          SQLite snapshot, containsMigration ⇒ no-auto-rollback (hold Degraded + page).
+          AC: kind e2e — bad image auto-rolls-back + Slack failure message lands;
+          broken migration release holds Degraded and pages instead of rolling back.
+```
+
+Deferred: channels beyond `stable`, soak delay for auto mode, supervisor
+announcing updates to *itself*. (T-9 manifest signing: implemented — ed25519
+detached signatures, fail-closed when `updates.manifestPublicKey` is set.)
+
+### 24.10 Open questions (carry into the build)
+
+1. Slack upgrade-prompt timeout / re-prompt cadence — share the §22.1 answer
+   for secret approvals?
+2. Should `auto` mode apply immediately or after a soak delay (N hours after
+   publish)?
+3. Pre-migration snapshot retention count (ties into T-2 audit/GC).
 
 ---
 

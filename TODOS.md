@@ -51,3 +51,21 @@ Deferred work captured during the v0.2 eng review (2026-06-20). Not MVP-blocking
 - **Pros:** First-class pluggable identity realized.
 - **Cons:** Each provider is its own verification + trust model.
 - **Depends on:** identity interface (in v0.2 design).
+
+## T-8 — Self-update plane (`claw-supervisor`) — ✅ IMPLEMENTED (2026-07-16)
+- **Status:** Phases 8a–8e built AND live-tested — the k3d e2e
+  (`scripts/e2e-selfupdate-k3d.sh`, CI job on main/dispatch) passed 24/24
+  incl. chart adoption, signed auto-upgrade, tamper rejection, and the
+  auto-rollback drill. T-9 signing also done.
+- **What:** The chart installs a tiny always-running supervisor that owns the controller StatefulSet, polls a digest-pinned release manifest, asks the upgrade admin in Slack (mode `prompt|auto|manual` set at helm install), applies updates, health-watches the rollout, and auto-rolls-back on failure. Full design: **DESIGN.md §24** (ControlPlane CRD, manifest schema, values surface, Phases 8a–8e).
+- **Why:** Upgrades today are manual `install.sh` reruns; a controller that patches its own StatefulSet can't roll itself back — the updater must survive the update.
+- **Pros:** One-button (or zero-button) upgrades; the rollback watchdog also covers helm-driven upgrades; the chart becomes nearly frozen; kills the `latest`-tag default in favor of pinned digests.
+- **Cons:** New binary + a second CRD kind (`ControlPlane` — infrastructure, not user-facing; `Agent` stays the only user resource); a Slack button changes running control-plane code (mitigated by digest pinning, stored-admin identity, notify-only degradation for chart-level releases; signing is T-9); schema migrations constrain rollback (pre-migration SQLite snapshot + additive-only policy).
+- **Depends on:** Phases 0–6 (done); a release pipeline that publishes the version manifest; §8.1 Slack interaction machinery (reused for the upgrade buttons).
+
+## T-9 — Release-manifest signing — ✅ IMPLEMENTED (2026-07-16)
+- **Status:** ed25519 detached signature (`manifest-stable.json.sig`), verified stdlib-only in the supervisor; fail-closed when `updates.manifestPublicKey` (PEM) is set, unsigned mode otherwise. CI signs when the `MANIFEST_SIGNING_KEY` secret exists. **To enable:** `openssl genpkey -algorithm ed25519 -out manifest-signing.key && openssl pkey -in manifest-signing.key -pubout` → store the private key as the GitHub secret, put the public PEM in values.
+- **What:** Sign the release manifest; the supervisor verifies before applying.
+- **Why:** In `auto` mode a compromised manifest endpoint is in-cluster code execution; HTTPS + the chart-pinned URL was the only anchor.
+- **Cons (standing):** a lost signing key blocks signed releases until the value-side key rotates with it; no key-rotation overlap scheme (single key).
+- **Depends on:** T-8 (done).

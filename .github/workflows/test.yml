@@ -1,0 +1,73 @@
+name: test
+
+# Test gates:
+#   unit-envtest — go vet + the full unit suite + controller/supervisor
+#                  integration tests against a real apiserver (envtest), plus a
+#                  helm render check. Every push + PR.
+#   e2e-selfupdate — the k3d self-update e2e (scripts/e2e-selfupdate-k3d.sh):
+#                  old-chart adoption, signed auto-upgrade, tamper rejection,
+#                  broken-release auto-rollback. Heavier (~20 min), so it runs
+#                  on pushes to main and manual dispatch, not every PR.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-envtest:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: go vet
+        run: go vet ./...
+      - name: unit tests
+        run: go test ./...
+      - name: envtest (real apiserver)
+        run: |
+          KUBEBUILDER_ASSETS="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest use -p path)" \
+            go test ./internal/controller/ ./internal/supervisor/ -run Envtest -count=1 -v
+      - name: helm render check
+        run: |
+          helm template claw ./charts/claw > /dev/null
+          helm template claw ./charts/claw --set slack.enabled=true \
+            --set updates.mode=manual --set version=9.9.9 > /dev/null
+
+  e2e-selfupdate:
+    # The full self-update lifecycle on a throwaway k3d cluster. Runs after the
+    # cheap gate; skipped on PRs to keep PR feedback fast — dispatch it manually
+    # (or push to main) to exercise it.
+    if: github.event_name != 'pull_request'
+    needs: unit-envtest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The e2e installs the pre-supervisor chart from git history
+          # (OLD_CHART_REF) to prove the ≤0.3.x → 0.4.0 adoption path.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Install k3d
+        run: curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+      - name: Run the self-update e2e
+        run: ./scripts/e2e-selfupdate-k3d.sh
+      - name: Cluster state on failure
+        if: failure()
+        run: |
+          export KUBECONFIG="$(ls -td /tmp/claw-e2e.*/kubeconfig | head -1)" || true
+          kubectl -n claw-system get controlplane claw -o yaml || true
+          kubectl -n claw-system get pods -o wide || true
+          kubectl -n claw-system logs deploy/claw-supervisor --tail=100 || true

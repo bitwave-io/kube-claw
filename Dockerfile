@@ -10,8 +10,11 @@ RUN go mod download
 COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+# Release version stamped into the binary (internal/version); "dev" locally.
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/claw-controller ./cmd/claw-controller
+    go build -trimpath -ldflags="-s -w -X github.com/traego/kube-claw/internal/version.Version=${VERSION}" \
+    -o /out/claw-controller ./cmd/claw-controller
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/claw-controller /claw-controller

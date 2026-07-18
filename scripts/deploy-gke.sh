@@ -150,13 +150,20 @@ echo "  stored admin password in Secret claw-admin (user: admin)"
 helm upgrade --install claw "$ROOT/charts/claw" -n "$NS" \
   -f "$ROOT/charts/claw/values-gke.yaml" \
   --set image.repository="${REGISTRY}/kube-claw-controller" \
-  --set image.tag="$TAG" \
-  --set controller.runnerImage="${REGISTRY}/kube-claw-runner:${TAG}" \
+  --set image.runnerRepository="${REGISTRY}/kube-claw-runner" \
+  --set supervisor.repository="${REGISTRY}/kube-claw-supervisor" \
+  --set version="$TAG" \
   --set controller.uiBaseURL="https://${UI_HOST}" \
   --set ui.ingress.host="$UI_HOST" \
   ${slack_args[@]+"${slack_args[@]}"} "$@"
 
-kubectl -n "$NS" rollout status statefulset/claw-controller --timeout=180s
+kubectl -n "$NS" rollout status deployment/claw-supervisor --timeout=180s
+echo "waiting for the supervisor to create the controller..."
+for i in $(seq 1 60); do
+  kubectl -n "$NS" get statefulset/claw-controller >/dev/null 2>&1 && break
+  sleep 2
+done
+kubectl -n "$NS" rollout status statefulset/claw-controller --timeout=300s
 
 echo
 echo "Done. kube-claw is deployed to '$NS' on context '$CTX'."

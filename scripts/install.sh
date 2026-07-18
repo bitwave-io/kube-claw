@@ -10,21 +10,30 @@
 #
 # Usage:
 #   ./scripts/install.sh                         # interactive, current kube context
-#   IMAGE_TAG=v0.2.0 ./scripts/install.sh        # pin a published tag
+#   VERSION=0.5.0 ./scripts/install.sh           # pin a specific published release
 #   ./scripts/install.sh --set controller.replicas=2   # extra args pass through to helm
 #
-# Override the images (e.g. a private mirror or a custom build):
+# Override the images (e.g. a private mirror or a custom build). With a custom
+# registry, self-update degrades to notify-only unless you also publish your own
+# release manifest and set updates.manifestURL (DESIGN.md §24.3):
 #   IMAGE_REPO=docker.io/myorg/claw-controller \
-#   RUNNER_IMAGE=docker.io/myorg/claw-runner:mytag \
-#   IMAGE_TAG=mytag ./scripts/install.sh
+#   RUNNER_REPO=docker.io/myorg/claw-runner \
+#   SUPERVISOR_REPO=docker.io/myorg/claw-supervisor \
+#   VERSION=mytag ./scripts/install.sh
 set -euo pipefail
 
 NS="${NS:-claw-system}"
 AGENTS_NS="${AGENTS_NS:-claw-agents}"
 IMAGE_REPO="${IMAGE_REPO:-docker.io/bitwavecode/kube-claw-controller}"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
-RUNNER_IMAGE="${RUNNER_IMAGE:-docker.io/bitwavecode/kube-claw-runner:${IMAGE_TAG}}"
+RUNNER_REPO="${RUNNER_REPO:-docker.io/bitwavecode/kube-claw-runner}"
+SUPERVISOR_REPO="${SUPERVISOR_REPO:-docker.io/bitwavecode/kube-claw-supervisor}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The pinned release version (immutable tag — NOT latest; self-update needs a
+# semver-comparable identity). Defaults to the chart's appVersion.
+VERSION="${VERSION:-${IMAGE_TAG:-}}"
+if [[ -z "$VERSION" ]]; then
+  VERSION="$(sed -n 's/^appVersion: "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ROOT/charts/claw/Chart.yaml")"
+fi
 
 # --- preflight ---------------------------------------------------------------
 for bin in kubectl helm; do
@@ -39,8 +48,8 @@ CTX="$(kubectl config current-context 2>/dev/null || echo '?')"
 echo "kube-claw will install into:"
 echo "  context:    $CTX"
 echo "  namespaces: $NS (control plane), $AGENTS_NS (agent run pods)"
-echo "  image:      ${IMAGE_REPO}:${IMAGE_TAG}"
-echo "  runner:     ${RUNNER_IMAGE}"
+echo "  version:    ${VERSION}"
+echo "  images:     ${IMAGE_REPO} + ${RUNNER_REPO} + ${SUPERVISOR_REPO}"
 echo
 read -rp "Proceed? [y/N] " go
 [[ "$go" =~ ^[Yy] ]] || { echo "aborted."; exit 0; }
@@ -112,15 +121,39 @@ if [[ -n "$uiurl" ]]; then
   fi
 fi
 
+# --- self-update mode ----------------------------------------------------------
+# DESIGN.md §24.4: prompt = ask the upgrade admin in Slack before applying a new
+# release; auto = apply unprompted (still health-watched); manual = only helm
+# moves the version (new releases are announced, never self-applied).
+UPDATES_MODE="${UPDATES_MODE:-}"
+if [[ -z "$UPDATES_MODE" ]]; then
+  read -rp "Self-update mode — prompt/auto/manual [prompt]: " UPDATES_MODE
+  UPDATES_MODE="${UPDATES_MODE:-prompt}"
+fi
+case "$UPDATES_MODE" in
+  prompt|auto|manual) ;;
+  *) echo "  unknown mode '$UPDATES_MODE', using 'prompt'"; UPDATES_MODE=prompt ;;
+esac
+
 # --- install -----------------------------------------------------------------
 helm upgrade --install claw "$ROOT/charts/claw" -n "$NS" \
   --set image.repository="$IMAGE_REPO" \
-  --set image.tag="$IMAGE_TAG" \
-  --set controller.runnerImage="$RUNNER_IMAGE" \
+  --set image.runnerRepository="$RUNNER_REPO" \
+  --set supervisor.repository="$SUPERVISOR_REPO" \
+  --set version="$VERSION" \
+  --set updates.mode="$UPDATES_MODE" \
   ${slack_args[@]+"${slack_args[@]}"} \
   ${ui_args[@]+"${ui_args[@]}"} "$@"
 
-kubectl -n "$NS" rollout status statefulset/claw-controller --timeout=180s
+# The supervisor creates the controller StatefulSet from the ControlPlane CR
+# (it is no longer a Helm-rendered object — DESIGN.md §24.7).
+kubectl -n "$NS" rollout status deployment/claw-supervisor --timeout=180s
+echo "waiting for the supervisor to create the controller..."
+for i in $(seq 1 60); do
+  kubectl -n "$NS" get statefulset/claw-controller >/dev/null 2>&1 && break
+  sleep 2
+done
+kubectl -n "$NS" rollout status statefulset/claw-controller --timeout=300s
 
 echo
 echo "Done. kube-claw is running in '$NS' on context '$CTX'."

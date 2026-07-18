@@ -10,7 +10,7 @@ kubectl apply -f ./charts/crds/
 kubectl create namespace claw-system
 kubectl create namespace claw-agents
 helm upgrade --install claw ./charts/claw -n claw-system \
-  --set image.repository=<your-registry>/claw-controller --set image.tag=<tag>
+  --set image.repository=<your-registry>/claw-controller --set version=<tag>
 kubectl apply -f examples/gcp-cost-slack/agent.yaml
 ```
 

@@ -1,8 +1,9 @@
 # GKE Autopilot overlay for the claw control plane.
 #   helm upgrade --install claw ./charts/claw -n claw-system -f charts/claw/values-gke.yaml \
 #     --set image.repository=REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-controller \
-#     --set image.tag=TAG \
-#     --set controller.runnerImage=REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-runner:TAG \
+#     --set image.runnerRepository=REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-runner \
+#     --set supervisor.repository=REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-supervisor \
+#     --set version=TAG \
 #     --set controller.uiBaseURL=https://claw.example.com \
 #     --set ui.ingress.host=claw.example.com
 #
@@ -11,11 +12,21 @@
 
 image:
   repository: REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-controller
-  tag: TAG
+  runnerRepository: REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-runner
   pullPolicy: Always # prod: always pull the pinned tag from Artifact Registry
 
+supervisor:
+  repository: REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-supervisor
+
+version: "TAG"
+
+# Custom registry: the public release manifest can't speak for these images, so
+# self-update degrades to notify-only (DESIGN.md §24.3). Publish your own
+# manifest + set updates.manifestURL to re-enable it, or run manual mode.
+updates:
+  mode: manual
+
 controller:
-  runnerImage: REGION-docker.pkg.dev/PROJECT/REPO/kube-claw-runner:TAG
   # Structured JSON logs so Cloud Logging parses severity/message into fields.
   # (Same applies to AKS/Azure Monitor and EKS/CloudWatch overlays.)
   logFormat: json
