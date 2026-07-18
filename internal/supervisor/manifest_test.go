@@ -60,20 +60,20 @@ func TestFetchManifestSigned(t *testing.T) {
 	sig := ed25519.Sign(priv, []byte(goodManifest))
 
 	// PEM parsing round-trip (the env/values path).
-	parsed, err := ParseManifestPublicKey(pemStr)
-	if err != nil || !parsed.Equal(pub) {
-		t.Fatalf("ParseManifestPublicKey: %v", err)
+	parsed, err := ParseManifestPublicKeys(pemStr)
+	if err != nil || len(parsed) != 1 || !parsed[0].Equal(pub) {
+		t.Fatalf("ParseManifestPublicKeys: %v (%d keys)", err, len(parsed))
 	}
-	if k, err := ParseManifestPublicKey(""); err != nil || k != nil {
+	if k, err := ParseManifestPublicKeys(""); err != nil || k != nil {
 		t.Fatalf("empty key = (%v, %v), want unsigned mode", k, err)
 	}
-	if _, err := ParseManifestPublicKey("not pem"); err == nil {
+	if _, err := ParseManifestPublicKeys("not pem"); err == nil {
 		t.Fatal("garbage key must error")
 	}
 
 	// Valid raw signature verifies.
 	srv := manifestServer(t, goodManifest, sig)
-	m, err := FetchManifestSigned(ctx, srv.URL+"/manifest-stable.json", pub)
+	m, err := FetchManifestSigned(ctx, srv.URL+"/manifest-stable.json", []ed25519.PublicKey{pub})
 	if err != nil {
 		t.Fatalf("signed fetch: %v", err)
 	}
@@ -83,21 +83,21 @@ func TestFetchManifestSigned(t *testing.T) {
 
 	// Base64 signature (some pipelines encode) also verifies.
 	srv64 := manifestServer(t, goodManifest, []byte(base64.StdEncoding.EncodeToString(sig)+"\n"))
-	if _, err := FetchManifestSigned(ctx, srv64.URL+"/manifest-stable.json", pub); err != nil {
+	if _, err := FetchManifestSigned(ctx, srv64.URL+"/manifest-stable.json", []ed25519.PublicKey{pub}); err != nil {
 		t.Fatalf("base64-signed fetch: %v", err)
 	}
 
 	// Tampered manifest → rejected.
 	tampered := strings.Replace(goodManifest, "sha256:aaa", "sha256:evil", 1)
 	srvBad := manifestServer(t, tampered, sig)
-	if _, err := FetchManifestSigned(ctx, srvBad.URL+"/manifest-stable.json", pub); err == nil ||
+	if _, err := FetchManifestSigned(ctx, srvBad.URL+"/manifest-stable.json", []ed25519.PublicKey{pub}); err == nil ||
 		!strings.Contains(err.Error(), "verification FAILED") {
 		t.Fatalf("tampered manifest err = %v, want verification failure", err)
 	}
 
 	// Key configured but no signature published → fail closed.
 	srvNoSig := manifestServer(t, goodManifest, nil)
-	if _, err := FetchManifestSigned(ctx, srvNoSig.URL+"/manifest-stable.json", pub); err == nil ||
+	if _, err := FetchManifestSigned(ctx, srvNoSig.URL+"/manifest-stable.json", []ed25519.PublicKey{pub}); err == nil ||
 		!strings.Contains(err.Error(), "refusing unsigned") {
 		t.Fatalf("missing signature err = %v, want fail-closed", err)
 	}
@@ -109,7 +109,19 @@ func TestFetchManifestSigned(t *testing.T) {
 
 	// Wrong key → rejected.
 	otherPub, _, _ := testKeypair(t)
-	if _, err := FetchManifestSigned(ctx, srv.URL+"/manifest-stable.json", otherPub); err == nil {
+	if _, err := FetchManifestSigned(ctx, srv.URL+"/manifest-stable.json", []ed25519.PublicKey{otherPub}); err == nil {
 		t.Fatal("wrong key must fail verification")
+	}
+
+	// Rotation ring: the signature verifies against ANY configured key, so an
+	// install carrying [retired, current] keeps working across a key rollover.
+	if _, err := FetchManifestSigned(ctx, srv.URL+"/manifest-stable.json", []ed25519.PublicKey{otherPub, pub}); err != nil {
+		t.Fatalf("key ring must verify with any member: %v", err)
+	}
+
+	// Concatenated PEM blocks parse as a ring.
+	_, _, pem2 := testKeypair(t)
+	if keys, err := ParseManifestPublicKeys(pemStr + pem2); err != nil || len(keys) != 2 {
+		t.Fatalf("concatenated PEM ring = %d keys, err %v", len(keys), err)
 	}
 }

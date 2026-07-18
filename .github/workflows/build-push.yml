@@ -159,14 +159,34 @@ jobs:
           rm -f signing-key.pem
           echo "signed manifest-stable.json ($(wc -c < manifest-stable.json.sig) byte signature)"
 
+      # Publish the chart as an OCI artifact so installs are a single command
+      # with no repo clone:
+      #   helm install claw oci://registry-1.docker.io/bitwavecode/claw \
+      #     --version <semver> -n claw-system --create-namespace
+      # The .tgz also lands on the GitHub release for air-gapped installs.
+      - name: Package + push Helm chart
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/}"
+          TAG="${VERSION#v}"
+          helm package charts/claw --version "$TAG" --app-version "$TAG"
+          echo "$DOCKERHUB_TOKEN" | helm registry login registry-1.docker.io \
+            --username "$DOCKERHUB_USERNAME" --password-stdin
+          helm push "claw-$TAG.tgz" oci://registry-1.docker.io/bitwavecode
+
       - name: Create release + upload manifest
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/}"
+          TAG="${VERSION#v}"
           gh release view "$VERSION" >/dev/null 2>&1 ||             gh release create "$VERSION" --title "$VERSION" --generate-notes
           gh release upload "$VERSION" manifest-stable.json --clobber
+          gh release upload "$VERSION" "claw-$TAG.tgz" --clobber
           if [[ -f manifest-stable.json.sig ]]; then
             gh release upload "$VERSION" manifest-stable.json.sig --clobber
           fi

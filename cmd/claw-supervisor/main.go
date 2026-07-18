@@ -71,21 +71,22 @@ func main() {
 		log.Error(err, "unable to set up ControlPlane reconciler")
 		os.Exit(1)
 	}
-	// Manifest signing (T-9): a configured PEM public key makes signature
-	// verification mandatory (fail closed); absent = unsigned mode.
-	pubKey, err := supervisor.ParseManifestPublicKey(os.Getenv("CLAW_MANIFEST_PUBKEY"))
+	// Manifest signing (T-9): configured PEM public keys (one or more — a
+	// rotation ring) make signature verification mandatory (fail closed);
+	// absent = unsigned mode.
+	pubKeys, err := supervisor.ParseManifestPublicKeys(os.Getenv("CLAW_MANIFEST_PUBKEY"))
 	if err != nil {
 		log.Error(err, "invalid CLAW_MANIFEST_PUBKEY")
 		os.Exit(1)
 	}
-	if pubKey != nil {
-		log.Info("manifest signature verification enabled")
+	if len(pubKeys) > 0 {
+		log.Info("manifest signature verification enabled", "keys", len(pubKeys))
 	}
 	if err := mgr.Add(&supervisor.Poller{
 		Client:          mgr.GetClient(),
 		Namespace:       namespace,
 		DefaultInterval: checkInterval,
-		PubKey:          pubKey,
+		PubKeys:         pubKeys,
 	}); err != nil {
 		log.Error(err, "unable to add release poller")
 		os.Exit(1)

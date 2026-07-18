@@ -56,22 +56,31 @@ func FetchManifest(ctx context.Context, url string) (Manifest, error) {
 }
 
 // FetchManifestSigned GETs, verifies, and validates a release manifest (T-9).
-// With a public key, the detached signature at <url>.sig MUST verify over the
-// exact manifest bytes — a missing or invalid signature rejects the manifest
-// (fail closed). In auto mode the manifest endpoint is release authority, so
-// the trust anchor must not ride the same channel: the key comes from Helm
-// values (env), never from the manifest or its host.
-func FetchManifestSigned(ctx context.Context, url string, pubKey ed25519.PublicKey) (Manifest, error) {
+// With public keys configured, the detached signature at <url>.sig MUST verify
+// over the exact manifest bytes with AT LEAST ONE key — a missing or invalid
+// signature rejects the manifest (fail closed). Multiple keys form a rotation
+// ring: installs carry old+new during a key rollover, so rotation is never a
+// flag day. In auto mode the manifest endpoint is release authority, so the
+// trust anchor must not ride the same channel: the keys come from Helm values
+// (env), never from the manifest or its host.
+func FetchManifestSigned(ctx context.Context, url string, pubKeys []ed25519.PublicKey) (Manifest, error) {
 	raw, err := fetchBytes(ctx, url, 1<<20)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("manifest fetch: %w", err)
 	}
-	if len(pubKey) == ed25519.PublicKeySize {
+	if len(pubKeys) > 0 {
 		sig, err := fetchBytes(ctx, url+".sig", 4096)
 		if err != nil {
 			return Manifest{}, fmt.Errorf("manifest signature fetch (key configured, refusing unsigned): %w", err)
 		}
-		if !ed25519.Verify(pubKey, raw, normalizeSig(sig)) {
+		verified := false
+		for _, k := range pubKeys {
+			if ed25519.Verify(k, raw, normalizeSig(sig)) {
+				verified = true
+				break
+			}
+		}
+		if !verified {
 			return Manifest{}, fmt.Errorf("manifest signature verification FAILED for %s", url)
 		}
 	}
@@ -88,26 +97,36 @@ func FetchManifestSigned(ctx context.Context, url string, pubKey ed25519.PublicK
 	return m, nil
 }
 
-// ParseManifestPublicKey parses a PEM-encoded ed25519 public key (the
-// CLAW_MANIFEST_PUBKEY env / updates.manifestPublicKey value). "" → nil
+// ParseManifestPublicKeys parses one or more concatenated PEM-encoded ed25519
+// public keys (the CLAW_MANIFEST_PUBKEY env / updates.manifestPublicKey
+// value) — a rotation ring; verification passes on any of them. "" → nil
 // (unsigned mode).
-func ParseManifestPublicKey(pemStr string) (ed25519.PublicKey, error) {
+func ParseManifestPublicKeys(pemStr string) ([]ed25519.PublicKey, error) {
 	if strings.TrimSpace(pemStr) == "" {
 		return nil, nil
 	}
-	block, _ := pem.Decode([]byte(pemStr))
-	if block == nil {
+	var keys []ed25519.PublicKey
+	rest := []byte(pemStr)
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("manifest public key: %w", err)
+		}
+		key, ok := parsed.(ed25519.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("manifest public key: %T is not ed25519", parsed)
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
 		return nil, fmt.Errorf("manifest public key: not PEM")
 	}
-	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("manifest public key: %w", err)
-	}
-	key, ok := parsed.(ed25519.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("manifest public key: %T is not ed25519", parsed)
-	}
-	return key, nil
+	return keys, nil
 }
 
 // normalizeSig accepts a raw 64-byte ed25519 signature (openssl pkeyutl

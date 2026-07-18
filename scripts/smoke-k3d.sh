@@ -45,7 +45,7 @@ k3d image import kube-claw-controller:dev kube-claw-runner:dev kube-claw-supervi
 
 # 3. Install/upgrade charts. CRDs apply via kubectl (not Helm — Helm only installs
 # crds/ on first install and never upgrades them), matching the deploy scripts.
-kubectl apply -f ./charts/crds/
+kubectl apply -f ./charts/claw/crds/
 kubectl create namespace claw-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace claw-agents --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install claw ./charts/claw -n claw-system \

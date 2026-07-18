@@ -14,11 +14,12 @@ all: generate manifests vet test build
 generate:
 	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths="./api/..."
 
-# Generate the CRDs (Agent + ControlPlane) into charts/crds (raw manifests,
-# kubectl-applied by install.sh — Helm never upgrades CRDs).
+# Generate the CRDs (Agent + ControlPlane) into charts/claw/crds — Helm
+# installs them on FIRST install (a chart's crds/ dir); UPGRADES must still
+# kubectl-apply them (Helm never upgrades CRDs), which install.sh does.
 .PHONY: manifests
 manifests:
-	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=charts/crds
+	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=charts/claw/crds
 
 .PHONY: vet
 vet:
@@ -62,7 +63,7 @@ fmt:
 	go fmt ./...
 
 # Render the Helm chart (Phase 0 acceptance check). CRDs are raw manifests in
-# charts/crds (kubectl-applied), not a chart.
+# charts/claw/crds (helm-installed on first install, kubectl-applied on upgrade).
 .PHONY: helm-template
 helm-template: manifests
 	helm template claw ./charts/claw

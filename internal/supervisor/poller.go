@@ -23,10 +23,11 @@ type Poller struct {
 	client.Client
 	Namespace       string
 	DefaultInterval time.Duration
-	// PubKey verifies the manifest's detached signature (T-9). nil = unsigned
+	// PubKeys verify the manifest's detached signature (T-9, any-of — a
+	// rotation ring). nil = unsigned
 	// mode; set = fail closed on a missing/invalid signature.
-	PubKey ed25519.PublicKey
-	// Fetch is injectable for tests; defaults to FetchManifestSigned with PubKey.
+	PubKeys []ed25519.PublicKey
+	// Fetch is injectable for tests; defaults to FetchManifestSigned with PubKeys.
 	Fetch func(ctx context.Context, url string) (Manifest, error)
 	// Now is injectable for tests; defaults to time.Now.
 	Now func() time.Time
@@ -91,7 +92,7 @@ func (p *Poller) pollOne(ctx context.Context, cp *clawv1alpha1.ControlPlane) err
 	fetch := p.Fetch
 	if fetch == nil {
 		fetch = func(ctx context.Context, url string) (Manifest, error) {
-			return FetchManifestSigned(ctx, url, p.PubKey)
+			return FetchManifestSigned(ctx, url, p.PubKeys)
 		}
 	}
 	url := cp.Spec.Updates.ManifestURL

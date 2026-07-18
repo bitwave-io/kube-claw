@@ -132,7 +132,7 @@ ok "manifest server serving"
 # --- Phase A: old chart ---------------------------------------------------------
 step "Phase A: install the OLD chart ($OLD_CHART_REF) with v0.9.0 images"
 git archive "$OLD_CHART_REF" charts | tar -x -C "$WORK"
-kubectl apply -f "$WORK/charts/crds/"
+kubectl apply -f "$WORK/charts/claw/crds/"
 kubectl create ns "$NS" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create ns claw-agents --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install claw "$WORK/charts/claw" -n "$NS" \
@@ -149,7 +149,7 @@ ok "store marker written"
 
 # --- Phase B: chart migration (old → supervisor-owned) --------------------------
 step "Phase B: upgrade to the NEW chart — supervisor adopts, PVC survives (§24.8)"
-kubectl apply -f "$ROOT/charts/crds/"
+kubectl apply -f "$ROOT/charts/claw/crds/"
 helm upgrade claw "$ROOT/charts/claw" -n "$NS" \
   --set image.repository=kube-claw-controller \
   --set image.runnerRepository=kube-claw-runner \

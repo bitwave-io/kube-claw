@@ -56,7 +56,7 @@ read -rp "Proceed? [y/N] " go
 
 # Apply CRDs with kubectl, not Helm: Helm only installs crds/ on first install and
 # never upgrades them, so kubectl apply is the robust path for install AND upgrade.
-kubectl apply -f "$ROOT/charts/crds/"
+kubectl apply -f "$ROOT/charts/claw/crds/"
 kubectl get ns "$NS"        >/dev/null 2>&1 || kubectl create ns "$NS"
 kubectl get ns "$AGENTS_NS" >/dev/null 2>&1 || kubectl create ns "$AGENTS_NS"
 

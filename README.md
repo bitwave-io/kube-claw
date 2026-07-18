@@ -17,8 +17,26 @@ value never enters the model's context or the logs.
 ## Quickstart
 
 **Prerequisites:** an authenticated `kubectl` pointed at any cluster, `helm`, and a
-Slack app + Anthropic API key. No Docker build — the install pulls published images
-from Docker Hub (`docker.io/bitwavecode/kube-claw-*`).
+Slack app + Anthropic API key. No Docker build, no repo clone — the chart and images
+are published to Docker Hub (`docker.io/bitwavecode/*`).
+
+**Helm-only install** (the chart is self-contained — CRDs included, signed
+self-updates verified out of the box; every knob is a value):
+
+```bash
+kubectl create namespace claw-system && kubectl create namespace claw-agents
+kubectl -n claw-system create secret generic claw-slack-tokens \
+  --from-literal=app-token=xapp-... --from-literal=bot-token=xoxb-...
+kubectl -n claw-agents create secret generic claw-anthropic-key \
+  --from-literal=api-key=sk-ant-...
+kubectl -n claw-system create secret generic claw-admin --from-literal=password=...
+
+helm install claw oci://registry-1.docker.io/bitwavecode/claw \
+  -n claw-system --set slack.enabled=true
+```
+
+Or clone the repo for the interactive script, which does all of the above with
+prompts:
 
 ```bash
 # Installs onto your CURRENT kubectl context.
