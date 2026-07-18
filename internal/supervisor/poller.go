@@ -100,10 +100,13 @@ func (p *Poller) pollAll(ctx context.Context) {
 }
 
 // clearCheckRequested best-effort removes the on-demand-check annotation.
+// It mutates cp IN PLACE (no DeepCopy): a successful Update refreshes cp's
+// resourceVersion, which the subsequent pollOne status write depends on — a
+// copy leaves cp stale and the status update conflicts (caught live; the fake
+// client tolerates stale writes, the real apiserver does not).
 func (p *Poller) clearCheckRequested(ctx context.Context, cp *clawv1alpha1.ControlPlane) {
-	fresh := cp.DeepCopy()
-	delete(fresh.Annotations, clawv1alpha1.AnnotationCheckRequested)
-	if err := p.Update(ctx, fresh); err != nil {
+	delete(cp.Annotations, clawv1alpha1.AnnotationCheckRequested)
+	if err := p.Update(ctx, cp); err != nil {
 		logf.Log.WithName("release-poller").Error(err, "clear check-requested annotation", "controlplane", cp.Name)
 	}
 }
