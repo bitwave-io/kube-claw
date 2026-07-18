@@ -8,7 +8,7 @@ image:
 # detected" meaningless). This is the Helm-pinned floor: `helm upgrade` moves
 # it, and in prompt/auto modes the self-update plane may move the RUNNING
 # version past it (DESIGN.md §24.2). Bump in lockstep with Chart.yaml appVersion.
-version: "0.4.5"
+version: "0.4.6"
 
 # Self-update policy (DESIGN.md §24.4), rendered into the ControlPlane CR:
 #   prompt — new releases are offered to the upgrade admin in Slack; the
