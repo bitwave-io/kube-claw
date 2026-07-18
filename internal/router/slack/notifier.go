@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/slack-go/slack"
 )
@@ -13,10 +16,81 @@ import (
 // The live posting needs real Slack credentials to exercise.
 type Notifier struct {
 	api *slack.Client
+
+	nameMu sync.Mutex
+	names  map[string]nameEntry
 }
 
 func NewNotifier(botToken string) *Notifier {
 	return &Notifier{api: slack.New(botToken)}
+}
+
+// --- Slack id → name resolution (dashboard display) -------------------------
+
+// nameTTL bounds how long id→name lookups are cached. Failures are cached too
+// (negative caching): a Slack outage must not turn every dashboard load into a
+// wall of timed-out API calls.
+const nameTTL = time.Hour
+
+type nameEntry struct {
+	name string
+	at   time.Time
+}
+
+// UserName resolves a Slack user id to a human name ("" when Slack is off or
+// the lookup fails — callers fall back to the raw id). Nil-receiver safe.
+func (n *Notifier) UserName(ctx context.Context, id string) string {
+	return n.resolveName(ctx, "u:"+id, func(ctx context.Context) (string, error) {
+		u, err := n.api.GetUserInfoContext(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case u.Profile.DisplayName != "":
+			return u.Profile.DisplayName, nil
+		case u.RealName != "":
+			return u.RealName, nil
+		}
+		return u.Name, nil
+	})
+}
+
+// ChannelName resolves a channel id to its name (no leading '#'), "" on
+// failure. Nil-receiver safe.
+func (n *Notifier) ChannelName(ctx context.Context, id string) string {
+	return n.resolveName(ctx, "c:"+id, func(ctx context.Context) (string, error) {
+		ch, err := n.api.GetConversationInfoContext(ctx, &slack.GetConversationInfoInput{ChannelID: id})
+		if err != nil {
+			return "", err
+		}
+		return ch.Name, nil
+	})
+}
+
+func (n *Notifier) resolveName(ctx context.Context, key string, fetch func(context.Context) (string, error)) string {
+	if n == nil || strings.HasSuffix(key, ":") { // nil notifier or empty id
+		return ""
+	}
+	n.nameMu.Lock()
+	if e, ok := n.names[key]; ok && time.Since(e.at) < nameTTL {
+		n.nameMu.Unlock()
+		return e.name
+	}
+	n.nameMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	name, err := fetch(ctx)
+	if err != nil {
+		name = ""
+	}
+	n.nameMu.Lock()
+	if n.names == nil {
+		n.names = map[string]nameEntry{}
+	}
+	n.names[key] = nameEntry{name: name, at: time.Now()}
+	n.nameMu.Unlock()
+	return name
 }
 
 // PostReply posts an agent's output back to the originating Slack thread.

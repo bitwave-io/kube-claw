@@ -1,10 +1,12 @@
 package apihttp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
+	"regexp"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -174,6 +176,7 @@ func (s *Server) requestsPage(w http.ResponseWriter, r *http.Request) {
 	type reqRow struct {
 		store.SecretRequest
 		SecretName string
+		ByDisplay  string
 	}
 	var rows []reqRow
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
@@ -188,27 +191,34 @@ func (s *Server) requestsPage(w http.ResponseWriter, r *http.Request) {
 					name = sec.Name
 				}
 			}
-			rows = append(rows, reqRow{SecretRequest: rq, SecretName: name})
+			rows = append(rows, reqRow{SecretRequest: rq, SecretName: name,
+				ByDisplay: s.slackUser(r.Context(), rq.RequestedBy)})
 		}
 		return nil
 	})
 	// Pending git-repo access requests share this page (same break-glass flow).
-	var gitRows []store.GitRepoRequest
+	type gitRow struct {
+		store.GitRepoRequest
+		ByDisplay string
+	}
+	var gitRows []gitRow
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
 		got, e := tx.ListGitRepoRequests("Pending")
-		gitRows = got
+		for _, rq := range got {
+			gitRows = append(gitRows, gitRow{GitRepoRequest: rq, ByDisplay: s.slackUser(r.Context(), rq.RequestedBy)})
+		}
 		return e
 	})
 	data := struct {
 		Secrets  []reqRow
-		GitRepos []store.GitRepoRequest
+		GitRepos []gitRow
 	}{rows, gitRows}
 	body := `<p class=mut>Pending access requests. The agent's reason and who it's for are shown so you can make an informed call. Approving here is break-glass (it bypasses the Slack granter check) and is audited.</p>
 <h2>Secrets</h2>
 <table><tr><th>When</th><th>Agent</th><th>Secret</th><th>For (who)</th><th>Reason (why)</th><th></th></tr>
 {{range .D.Secrets}}<tr>
 <td class=mut>{{.CreatedAt}}</td><td><code>{{.AgentName}}</code></td><td><code>{{.SecretName}}</code></td>
-<td>{{if .RequestedBy}}{{.RequestedBy}}{{else}}<span class=mut>—</span>{{end}}</td>
+<td>{{if .ByDisplay}}{{.ByDisplay}}{{else}}<span class=mut>—</span>{{end}}</td>
 <td>{{if .Context}}{{.Context}}{{else}}<span class=mut>(none)</span>{{end}}</td>
 <td style="display:flex;gap:.4rem">
 <form method=post action=/ui/requests/approve style=margin:0><input type=hidden name=id value="{{.ID}}"><button>Approve</button></form>
@@ -220,7 +230,7 @@ func (s *Server) requestsPage(w http.ResponseWriter, r *http.Request) {
 {{range .D.GitRepos}}<tr>
 <td class=mut>{{.CreatedAt}}</td><td><code>{{.AgentName}}</code></td><td><code>{{.RepoName}}</code></td>
 <td><code>{{.Access}}</code></td>
-<td>{{if .RequestedBy}}{{.RequestedBy}}{{else}}<span class=mut>—</span>{{end}}</td>
+<td>{{if .ByDisplay}}{{.ByDisplay}}{{else}}<span class=mut>—</span>{{end}}</td>
 <td>{{if .Context}}{{.Context}}{{else}}<span class=mut>(none)</span>{{end}}</td>
 <td style="display:flex;gap:.4rem">
 <form method=post action=/ui/gitrepo-requests/approve style=margin:0><input type=hidden name=id value="{{.ID}}"><button>Approve</button></form>
@@ -299,7 +309,8 @@ func (s *Server) conversationsPage(w http.ResponseWriter, r *http.Request) {
 			}
 			c, ok := byKey[key]
 			if !ok {
-				c = &conv{Channel: jsonField(run.Source, "channel"), Agent: run.AgentName, When: run.CreatedAt}
+				c = &conv{Channel: s.slackChannel(r.Context(), jsonField(run.Source, "channel")),
+					Agent: run.AgentName, When: run.CreatedAt}
 				byKey[key] = c
 				order = append(order, key) // first-seen = most recent activity
 			}
@@ -307,7 +318,9 @@ func (s *Server) conversationsPage(w http.ResponseWriter, r *http.Request) {
 			if outs, e := tx.ListOutputs(run.ID); e == nil && len(outs) > 0 {
 				out = outs[len(outs)-1].Content
 			}
-			t := turn{When: run.CreatedAt, Input: jsonField(run.Input, "text"), Output: out, Phase: run.Phase}
+			t := turn{When: run.CreatedAt,
+				Input:  s.resolveMentions(r.Context(), jsonField(run.Input, "text")),
+				Output: s.resolveMentions(r.Context(), out), Phase: run.Phase}
 			c.Turns = append([]turn{t}, c.Turns...) // prepend → chronological within the thread
 		}
 		return nil
@@ -318,7 +331,7 @@ func (s *Server) conversationsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	body := `<p class=mut>Each block is one continuous conversation (a Slack thread); turns are in order. Secret values never appear here.</p>
 {{range .D}}<div class=conv>
-<h3><span>{{if .Channel}}#{{.Channel}}{{else}}(direct){{end}} · {{.Agent}}</span><span class=mut>{{.When}}</span></h3>
+<h3><span>{{if .Channel}}{{.Channel}}{{else}}(direct){{end}} · {{.Agent}}</span><span class=mut>{{.When}}</span></h3>
 {{range .Turns}}
 <div class="turn u"><span class=who>user</span>{{.Input}}</div>
 <div class="turn a"><span class=who>kube-claw</span>{{if .Output}}{{.Output}}{{else}}<span class="pill {{.Phase}}">{{.Phase}}</span>{{end}}</div>
@@ -475,39 +488,47 @@ func (s *Server) agentSetIdle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) channelsPage(w http.ResponseWriter, r *http.Request) {
-	var cfgs []store.ChannelConfig
+	type row struct {
+		store.ChannelConfig
+		Display string // "#name" (resolved) or the raw id
+	}
+	var rows []row
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
 		got, e := tx.ListChannelConfigs()
-		cfgs = got
+		for _, c := range got {
+			rows = append(rows, row{ChannelConfig: c, Display: s.slackChannel(r.Context(), c.Channel)})
+		}
 		return e
 	})
 	body := `<p class=mut>Channels configure themselves when the bot is added (it DMs the inviter). This is the resulting routing.</p>
 <table><tr><th>Channel</th><th>Agent</th><th>Responds to</th><th>Replies</th><th>Updated</th></tr>
 {{range .D}}<tr>
-<td><code>{{.Channel}}</code></td><td><code>{{.AgentName}}</code></td>
+<td>{{.Display}}{{if ne .Display .Channel}} <code class=mut>{{.Channel}}</code>{{end}}</td><td><code>{{.AgentName}}</code></td>
 <td>{{if .MentionRequired}}@mentions only{{else}}every message{{end}}</td>
 <td>{{if .ThreadOnly}}in threads{{else}}in channel{{end}}</td>
 <td class=mut>{{.UpdatedAt}}</td>
 </tr>{{else}}<tr><td colspan=5 class=mut>No channels configured yet — add the bot to a channel.</td></tr>{{end}}</table>`
-	s.renderDash(w, "channels", "Channels", body, cfgs)
+	s.renderDash(w, "channels", "Channels", body, rows)
 }
 
 // settingsPage shows install-wide settings: the running version and the
 // upgrade admin (DESIGN.md §24.6), with a form to override the admin.
 func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
-	data := struct{ Version, Admin, Skipped, Mgmt string }{Version: version.Get()}
+	data := struct{ Version, Admin, AdminName, Skipped, Mgmt, MgmtName string }{Version: version.Get()}
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
 		data.Admin, _ = tx.GetSetting(store.SettingUpgradeAdmin)
 		data.Skipped, _ = tx.GetSetting(store.SettingSkippedVersion)
 		data.Mgmt, _ = tx.GetSetting(store.SettingMgmtChannel)
 		return nil
 	})
+	data.AdminName = s.Notifier.UserName(r.Context(), data.Admin)
+	data.MgmtName = s.Notifier.ChannelName(r.Context(), data.Mgmt)
 	body := `<p class=mut>Running controller version: <code>{{.D.Version}}</code>{{if .D.Skipped}} · skipped release: <code>{{.D.Skipped}}</code>{{end}}</p>
 <h2>Upgrade admin</h2>
 <p class=mut>The Slack user asked to approve kube-claw upgrades. Claimed during channel onboarding; override it here or with <code>claw settings set upgrade-admin U…</code>.</p>
 <form method=post action=/ui/settings>
-<label>Slack user id <input name=upgradeAdmin value="{{.D.Admin}}" placeholder="U0123456789"></label>
-<label>Management channel <input name=mgmtChannel value="{{.D.Mgmt}}" placeholder="C0123456789"></label>
+<label>Slack user id <input name=upgradeAdmin value="{{.D.Admin}}" placeholder="U0123456789">{{if .D.AdminName}} <span class=mut>= {{.D.AdminName}}</span>{{end}}</label>
+<label>Management channel <input name=mgmtChannel value="{{.D.Mgmt}}" placeholder="C0123456789">{{if .D.MgmtName}} <span class=mut>= {{.D.MgmtName}}</span>{{end}}</label>
 <button type=submit>Save</button>
 </form>
 <p class=mut>The management channel gets release announcements and upgrade lifecycle events (available, applied, rolled back). The bot must be a member of it. Also settable by DMing the bot <code>announce releases in #channel</code>.</p>`
@@ -525,6 +546,43 @@ func (s *Server) uiSetSettings(w http.ResponseWriter, r *http.Request) {
 		return tx.SetSetting(store.SettingMgmtChannel, mgmt)
 	})
 	http.Redirect(w, r, "/ui/settings", http.StatusSeeOther)
+}
+
+// slackMention matches an encoded Slack user mention in message text.
+var slackMention = regexp.MustCompile(`<@[UW][A-Z0-9]+>`)
+
+// slackUser renders a user id as "@name", falling back to the raw id when
+// Slack is off or the lookup fails (Notifier resolution is nil-safe + cached).
+func (s *Server) slackUser(ctx context.Context, id string) string {
+	if id == "" {
+		return ""
+	}
+	if name := s.Notifier.UserName(ctx, id); name != "" {
+		return "@" + name
+	}
+	return id
+}
+
+// slackChannel renders a channel id as "#name", falling back to the raw id.
+func (s *Server) slackChannel(ctx context.Context, id string) string {
+	if id == "" {
+		return ""
+	}
+	if name := s.Notifier.ChannelName(ctx, id); name != "" {
+		return "#" + name
+	}
+	return id
+}
+
+// resolveMentions replaces encoded <@U…> mentions inside message text with
+// @name so conversations read naturally; unresolvable ids stay as-is.
+func (s *Server) resolveMentions(ctx context.Context, text string) string {
+	return slackMention.ReplaceAllStringFunc(text, func(m string) string {
+		if name := s.Notifier.UserName(ctx, m[2:len(m)-1]); name != "" {
+			return "@" + name
+		}
+		return m
+	})
 }
 
 // jsonField pulls a string field out of an opaque JSON blob (run Source/Input).
