@@ -17,3 +17,4 @@ Dockerfile.*-prebuilt
 secrets.env
 scripts/up-gke.sh
 manifest-sign
+site/install.sh

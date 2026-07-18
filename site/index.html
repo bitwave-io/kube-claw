@@ -99,8 +99,7 @@ footer .links a{margin:0 .7rem}
   </div>
   <div class="term">
     <div class="bar"><i></i><i></i><i></i></div>
-    <pre>$ git clone https://github.com/bitwave-io/kube-claw && cd kube-claw
-$ ./scripts/install.sh
+    <pre>$ curl -fsSL https://kube-claw.com/install.sh | bash
 <span class="c"># @mention the bot in Slack —</span> <span class="g">you're live.</span></pre>
   </div>
 </div></header>
@@ -220,8 +219,7 @@ $ ./scripts/install.sh
   images come from Docker Hub.</p>
   <div class="term" style="margin:0 0 1.4rem">
     <div class="bar"><i></i><i></i><i></i></div>
-    <pre>$ git clone https://github.com/bitwave-io/kube-claw && cd kube-claw
-$ ./scripts/install.sh
+    <pre>$ curl -fsSL https://kube-claw.com/install.sh | bash
 <span class="c"># prompts for Slack tokens, Anthropic key, admin password —</span>
 <span class="c"># keys land in K8s Secrets, never in Helm values or history.</span>
 <span class="g">✓ control plane rolled out — admin URL + password printed</span></pre>
@@ -229,6 +227,9 @@ $ ./scripts/install.sh
   <p style="color:var(--mut);font-size:.94rem">Then add the bot to a Slack channel — it introduces
   itself and just works (@-mentions, replies in threads). Standing up a fresh GKE Autopilot cluster
   end-to-end? See <a href="https://github.com/bitwave-io/kube-claw/blob/main/docs/deploy-gke.md">docs/deploy-gke.md</a>.</p>
+  <p>Prefer plain Helm (or want to read the script first)? The chart is self-contained —
+  CRDs included, release signatures verified out of the box:
+  <code>helm install claw oci://registry-1.docker.io/bitwavecode/claw -n claw-system --create-namespace</code></p>
 </div></section>
 
 <section id="faq"><div class="wrap">

@@ -3,9 +3,17 @@
     "public": "site",
     "ignore": ["**/.*"],
     "cleanUrls": true,
+    "predeploy": ["cp scripts/install.sh site/install.sh"],
     "headers": [
       {
         "source": "/release-signing-key.pem",
+        "headers": [
+          { "key": "Content-Type", "value": "text/plain; charset=utf-8" },
+          { "key": "Cache-Control", "value": "public, max-age=300" }
+        ]
+      },
+      {
+        "source": "/install.sh",
         "headers": [
           { "key": "Content-Type", "value": "text/plain; charset=utf-8" },
           { "key": "Cache-Control", "value": "public, max-age=300" }
