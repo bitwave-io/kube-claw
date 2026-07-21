@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/approvals"
@@ -132,12 +133,41 @@ func (s *Server) agentBinding(ctx context.Context, ns, name string) (digest, spe
 	return "", ""
 }
 
+// dmIntakeLink DMs a one-time secret-intake link to user and returns who was
+// actually notified (empty when Slack is off or the send failed). Send failures
+// are logged, never swallowed: the "notified" list in the API response is how
+// the agent — and through it the requester — learns that nobody was pinged.
+func (s *Server) dmIntakeLink(ctx context.Context, user, name, description, tok, runID string) []string {
+	if s.Notifier == nil {
+		return []string{}
+	}
+	link := fmt.Sprintf("%s/ui/secret-intake/%s", s.UIBase, tok)
+	msg := fmt.Sprintf("An agent needs *%s* to answer your request", name)
+	if description != "" {
+		msg += fmt.Sprintf(" (%s)", description)
+	}
+	msg += ".\nAdd it with this one-time link:\n" + link
+	if err := s.Notifier.PostReply(ctx, user, "", msg); err != nil {
+		logf.Log.WithName("apihttp").Error(err, "secret intake DM failed", "user", user, "secret", name, "run", runID)
+		return []string{}
+	}
+	return []string{user}
+}
+
 // requestSecret handles an agent's on-demand credential request:
 //   - secret doesn't exist  → provision it (requester becomes granter, agent is
 //     self-granted) and DM the requester a one-time intake link.
-//   - exists + agent granted → no-op (the agent retrieves it next poll).
+//   - exists + agent granted + value present → no-op (the agent retrieves it
+//     next poll).
+//   - exists + agent granted + NO value → the intake link from the original
+//     provisioning was never used; mint a fresh one and DM the CURRENT
+//     requester (a "granted" grant on a valueless secret is otherwise a black
+//     hole: nobody gets pinged, ever).
 //   - exists + not granted  → open a SecretRequest and post Approve/Deny to the
 //     secret's GRANTERS with the agent's reason + who it's for (PAM access flow).
+//
+// Every response carries "notified": the Slack ids that were actually DM'd, so
+// the agent can tell the user who to expect a ping (or that nobody got one).
 func (s *Server) requestSecret(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
 	if claims, err := s.Signer.Verify(bearer(r)); err != nil || claims.RunID != runID {
@@ -207,20 +237,12 @@ func (s *Server) requestSecret(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "mint intake: "+err.Error())
 			return
 		}
-		if s.Notifier != nil {
-			link := fmt.Sprintf("%s/ui/secret-intake/%s", s.UIBase, tok)
-			msg := fmt.Sprintf("An agent needs *%s* to answer your request", req.Name)
-			if req.Description != "" {
-				msg += fmt.Sprintf(" (%s)", req.Description)
-			}
-			msg += ".\nAdd it with this one-time link:\n" + link
-			_ = s.Notifier.PostReply(r.Context(), user, "", msg)
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "provisioning"})
+		notified := s.dmIntakeLink(r.Context(), user, req.Name, req.Description, tok, runID)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "provisioning", "notified": notified})
 		return
 	}
 
-	// 2. Exists + agent already granted → nothing to do.
+	// 2. Exists + agent already granted.
 	granted := false
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
 		if _, e := tx.FindValidGrant(ns, agentName, sec.ID, digest, specHash, approvals.OnDemandDeliveryHash); e == nil {
@@ -229,7 +251,32 @@ func (s *Server) requestSecret(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if granted {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "granted"})
+		if val, err := s.Secrets.GetValue(r.Context(), ns, req.Name); err == nil && len(val) > 0 {
+			// Value present → nothing to do; the agent retrieves it next poll.
+			writeJSON(w, http.StatusOK, map[string]any{"status": "granted", "notified": []string{}})
+			return
+		}
+		// Granted but never filled (provisioned-then-abandoned). Re-run intake
+		// for the current requester; without this the request dies silently.
+		if user == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "provisioning", "notified": []string{}})
+			return
+		}
+		tok, err := s.Secrets.MintIntakeToken(r.Context(), ns, req.Name, runID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "mint intake: "+err.Error())
+			return
+		}
+		_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+			return tx.AppendAudit(store.AuditEvent{Type: "secret.intake_reissued", RunID: runID, SecretID: sec.ID,
+				Actor: user, Detail: map[string]any{"secret": req.Name}})
+		})
+		desc := req.Description
+		if desc == "" {
+			desc = sec.Description
+		}
+		notified := s.dmIntakeLink(r.Context(), user, req.Name, desc, tok, runID)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "provisioning", "notified": notified})
 		return
 	}
 
@@ -253,12 +300,23 @@ func (s *Server) requestSecret(w http.ResponseWriter, r *http.Request) {
 		return tx.AppendAudit(store.AuditEvent{Type: "secret.access_requested", RunID: runID, SecretID: sec.ID,
 			Actor: agentName, Detail: map[string]any{"secret": req.Name, "requestedBy": user, "reason": req.Reason}})
 	})
+	notified := []string{}
 	if isNew && s.Notifier != nil {
 		for _, g := range sec.Granters {
-			_ = s.Notifier.PostAccessRequest(r.Context(), g, req.Name, agentName, user, req.Reason, reqID)
+			if err := s.Notifier.PostAccessRequest(r.Context(), g, req.Name, agentName, user, req.Reason, reqID); err != nil {
+				logf.Log.WithName("apihttp").Error(err, "access-request DM failed", "granter", g, "secret", req.Name, "run", runID)
+				continue
+			}
+			notified = append(notified, g)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "access_requested"})
+	// pending=true → an earlier request is still open, so the granters were NOT
+	// re-pinged; the agent should point the user at them instead of implying a
+	// fresh notification went out.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "access_requested", "notified": notified,
+		"granters": sec.Granters, "pending": !isNew,
+	})
 }
 
 // requestedSecret returns an on-demand secret's value once the agent holds a valid

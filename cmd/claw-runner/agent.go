@@ -931,11 +931,40 @@ func (s *agentSession) requestSecret(ctx context.Context, name, description, rea
 	// Otherwise ask the controller: it provisions (DMs a link) or opens an access
 	// request to the secret's approvers, depending on whether it exists/is granted.
 	body, _ := json.Marshal(map[string]string{"name": name, "description": description, "reason": reason})
-	if err := s.post(ctx, fmt.Sprintf("/v1/runs/%s/request-secret", s.currentRunID()), body); err != nil {
+	resp, err := authedDo(ctx, http.MethodPost, fmt.Sprintf("%s/v1/runs/%s/request-secret", s.controllerURL, s.currentRunID()), body)
+	if err != nil {
 		return "Couldn't request the secret: " + err.Error()
 	}
+	// The controller reports who it actually DM'd ("notified") so the wait and
+	// the timeout message below can say so — "waiting" with no visible ping
+	// reads as a hang, and once meant the request had died silently.
+	var out struct {
+		Status   string   `json:"status"`
+		Notified []string `json:"notified"`
+		Granters []string `json:"granters"`
+		Pending  bool     `json:"pending"`
+	}
+	if resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return fmt.Sprintf("Couldn't request the secret: controller returned %s", resp.Status)
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+
+	pinged := mentions(out.Notified)
+	switch {
+	case out.Status == "granted":
+		s.setStep("Access to *" + name + "* is granted — fetching the value…")
+	case out.Status == "provisioning" && len(out.Notified) > 0:
+		s.setStep("Sent " + pinged + " a one-time link to provide *" + name + "* — waiting for the value…")
+	case len(out.Notified) > 0:
+		s.setStep("Asked " + pinged + " to approve access to *" + name + "* — waiting…")
+	case out.Pending:
+		s.setStep("An earlier access request for *" + name + "* is still pending with " + mentions(out.Granters) + " — waiting…")
+	default:
+		s.setStep("Waiting for access to *" + name + "*… (:warning: no Slack ping was sent)")
+	}
 	// Poll briefly in case it's approved/provided right away.
-	s.setStep("Waiting for access to *" + name + "* to be approved or provided…")
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
 		if path, content, ok := s.fetchRequested(ctx, name); ok {
@@ -952,7 +981,35 @@ func (s *agentSession) requestSecret(ctx context.Context, name, description, rea
 		case <-time.After(5 * time.Second):
 		}
 	}
-	return fmt.Sprintf("Access to *%s* isn't granted yet — either an approver needs to approve the request, or the user needs to provide the value via the DM link. Once they have, call request_secret again with name=%q to install it (do NOT bash-check — only this tool installs the value).", name, name)
+	// Timed out: say what actually happened — who was pinged, or that nobody
+	// was — so the model relays the truth instead of implying a DM went out.
+	retry := fmt.Sprintf(" Once they have, call request_secret again with name=%q to install it (do NOT bash-check — only this tool installs the value).", name)
+	switch {
+	case out.Status == "provisioning" && len(out.Notified) > 0:
+		return fmt.Sprintf("No value for *%s* yet — %s was DM'd a one-time intake link and hasn't used it. Tell the user who was pinged.%s", name, pinged, retry)
+	case out.Status == "provisioning":
+		return fmt.Sprintf("*%s* still has no value, and NOBODY was notified (Slack DM failed or Slack is off — see controller logs). The user must add the value another way (dashboard/operator); tell them no ping went out.%s", name, retry)
+	case out.Status == "access_requested" && out.Pending:
+		return fmt.Sprintf("Access to *%s* isn't granted yet — an EARLIER request is still pending with granter(s) %s, so no new ping was sent. Suggest the user nudge them.%s", name, mentions(out.Granters), retry)
+	case out.Status == "access_requested" && len(out.Notified) > 0:
+		return fmt.Sprintf("Access to *%s* isn't granted yet — %s got an Approve/Deny request and hasn't acted on it.%s", name, pinged, retry)
+	case out.Status == "access_requested":
+		return fmt.Sprintf("Access to *%s* isn't granted yet, and notifying its granter(s) %s FAILED (see controller logs) — they do NOT know about the request; tell the user.%s", name, mentions(out.Granters), retry)
+	}
+	return fmt.Sprintf("Access to *%s* isn't granted yet — either an approver needs to approve the request, or the user needs to provide the value.%s", name, retry)
+}
+
+// mentions renders Slack ids as @-mentions ("<@U1>, <@U2>"); "someone" when
+// empty (defensive: an older controller that doesn't report who it pinged).
+func mentions(ids []string) string {
+	if len(ids) == 0 {
+		return "someone"
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = "<@" + id + ">"
+	}
+	return strings.Join(out, ", ")
 }
 
 // install writes a fetched secret into the pod and wires it up for the request's
@@ -1077,18 +1134,6 @@ func readAPIError(resp *http.Response) string {
 		return out.Error
 	}
 	return "controller returned " + resp.Status
-}
-
-func (s *agentSession) post(ctx context.Context, path string, body []byte) error {
-	resp, err := authedDo(ctx, http.MethodPost, s.controllerURL+path, body)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("controller returned %s", resp.Status)
-	}
-	return nil
 }
 
 // fetchRequested returns (path, decoded value, true) once the secret is provided.
