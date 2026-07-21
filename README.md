@@ -1,4 +1,6 @@
-# 🦞 kube-claw
+<img src="images/kube-claw-square-transparent.png" alt="kube-claw" width="200">
+
+# kube-claw
 
 **A Kubernetes operator that runs sandboxed, Slack-triggered AI agents — with a real secret-authority and human-approved, audited credential access.**
 

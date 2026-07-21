@@ -165,6 +165,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/schedules", s.schedulesPage)
 	mux.HandleFunc("POST /ui/schedules/create", s.uiCreateSchedule)
 	mux.HandleFunc("POST /ui/schedules/delete", s.uiDeleteSchedule)
+	mux.HandleFunc("GET /ui/logo.png", s.logo)
 	mux.HandleFunc("GET /ui", s.dashboardHome)
 	mux.HandleFunc("GET /ui/dashboard", s.dashboardHome)
 	mux.HandleFunc("GET /ui/secrets", s.secretsPage)

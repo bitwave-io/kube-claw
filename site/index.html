@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kube-claw — your team's AI agents. Sandboxed. Audited. In your cluster.</title>
 <meta name="description" content="A Kubernetes operator that runs sandboxed, Slack-triggered AI agents — with a real secret authority, human-approved credential access, and a self-updating control plane.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦞</text></svg>">
+<link rel="icon" type="image/png" href="kube-claw.png">
 <style>
 :root{
   --bg:#0b0e14;--panel:#111622;--panel2:#0e1320;--line:#1e2636;
-  --ink:#e6e9f0;--mut:#8b94a7;--accent:#ff5c47;--accent2:#ffb347;
+  --ink:#e6e9f0;--mut:#8b94a7;--accent:#4a90ff;--accent2:#7fb0ff;
   --good:#3fdc97;--code:#0a0d13;--radius:12px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
@@ -23,14 +23,14 @@ code{background:#171d2b;padding:.12rem .4rem;border-radius:5px;font-size:.88em}
 nav{position:sticky;top:0;z-index:10;background:rgba(11,14,20,.86);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
 nav .wrap{display:flex;align-items:center;gap:1.4rem;height:60px}
 nav .brand{font-weight:800;font-size:1.05rem;color:var(--ink)}
-nav .brand span{margin-right:.4rem}
+nav .brand{display:inline-flex;align-items:center}nav .brand img{height:1.5rem;width:auto;margin-right:.4rem}
 nav a.nl{color:var(--mut);font-size:.92rem}
 nav a.nl:hover{color:var(--ink);text-decoration:none}
 nav .gh{margin-left:auto;border:1px solid var(--line);border-radius:8px;padding:.4rem .8rem;color:var(--ink);font-size:.9rem;background:var(--panel)}
 nav .gh:hover{border-color:var(--accent);text-decoration:none}
 header{padding:5.5rem 0 4rem;text-align:center;background:
-  radial-gradient(600px 300px at 50% -40px,rgba(255,92,71,.13),transparent 70%)}
-header .crab{font-size:3.4rem;display:block;margin-bottom:.6rem}
+  radial-gradient(600px 300px at 50% -40px,rgba(74,144,255,.15),transparent 70%)}
+header .crab{display:block;width:230px;height:auto;margin:0 auto .6rem}
 h1{font-size:clamp(2.3rem,6vw,3.4rem);font-weight:850;letter-spacing:-.02em}
 .tag{font-size:clamp(1.05rem,2.6vw,1.35rem);color:var(--ink);margin:.9rem 0 .4rem;font-weight:600}
 .tag em{font-style:normal;color:var(--accent)}
@@ -78,7 +78,7 @@ footer .links a{margin:0 .7rem}
 <body>
 
 <nav><div class="wrap">
-  <a class="brand" href="#"><span>🦞</span>kube-claw</a>
+  <a class="brand" href="#"><img src="kube-claw.png" alt="">kube-claw</a>
   <a class="nl" href="#features">Features</a>
   <a class="nl" href="#architecture">Architecture</a>
   <a class="nl" href="#start">Get started</a>
@@ -87,7 +87,7 @@ footer .links a{margin:0 .7rem}
 </div></nav>
 
 <header><div class="wrap">
-  <span class="crab">🦞</span>
+  <img class="crab" src="kube-claw-hero.png" alt="kube-claw mascot" width="925" height="499">
   <h1>kube-claw</h1>
   <p class="tag">Your team's AI agents. <em>Sandboxed. Audited. In your cluster.</em></p>
   <p class="sub">A Kubernetes operator that runs Slack-triggered AI agents in one-shot, scale-to-zero
@@ -272,7 +272,7 @@ footer .links a{margin:0 .7rem}
     <a href="https://nanoclaw.dev">nano-claw</a>
     <a href="https://bitwave.io">Bitwave</a>
   </div>
-  <p>🦞 kube-claw · AGPL-3.0 · a Kubernetes-native home for your team's agents</p>
+  <p><img src="kube-claw.png" alt="" style="height:1.1em;width:auto;vertical-align:-.2em;margin-right:.3em">kube-claw · AGPL-3.0 · a Kubernetes-native home for your team's agents</p>
   <p>Sponsored by <a href="https://bitwave.io">Bitwave</a> — digital asset finance for the enterprise.</p>
 </div></footer>
 
