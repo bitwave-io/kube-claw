@@ -194,3 +194,18 @@ func (ts *tokenState) applyLocked(out tokenResp) {
 		ts.expiresAt = time.Unix(out.ExpiresAt, 0)
 	}
 }
+
+// installClaimedToken swaps in the run-scoped access token that claim-next hands
+// back with each warm turn. The access token minted at /login is bound to the
+// login run; without this, run-scoped calls on a follow-up turn (a different run)
+// 401 — and renewal can't help, since /token/refresh re-issues for the SAME bound
+// run. The refresh token is left untouched (it stays pod-bound and is not
+// re-issued here).
+func installClaimedToken(token string, expiresAt int64) {
+	if token == "" {
+		return
+	}
+	clawTokens.mu.Lock()
+	defer clawTokens.mu.Unlock()
+	clawTokens.applyLocked(tokenResp{Token: token, ExpiresAt: expiresAt})
+}

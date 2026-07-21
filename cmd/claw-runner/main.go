@@ -223,10 +223,19 @@ func claimNextTurn(controllerURL, sessionID, pod string) (runID, input string, o
 		fmt.Fprintf(os.Stderr, "claw-runner: claim-next returned %s\n", resp.Status)
 		return "", "", false
 	}
-	var out struct{ RunID, Input string }
+	var out struct {
+		RunID     string `json:"runId"`
+		Input     string `json:"input"`
+		Token     string `json:"token"`
+		ExpiresAt int64  `json:"expiresAt"`
+	}
 	if json.NewDecoder(resp.Body).Decode(&out) != nil {
 		return "", "", false
 	}
+	// Install the run-scoped token for the claimed turn before any run-scoped call
+	// (request_secret, outputs) runs against out.RunID. Without this the pod keeps
+	// using the login-run token and every follow-up turn 401s.
+	installClaimedToken(out.Token, out.ExpiresAt)
 	return out.RunID, out.Input, true
 }
 
