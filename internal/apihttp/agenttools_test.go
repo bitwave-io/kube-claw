@@ -238,3 +238,78 @@ func TestRequestSecretPendingRequestReported(t *testing.T) {
 		t.Fatalf("granters = %v, want [U_GRANTER]", out.Granters)
 	}
 }
+
+// TestAgentCreateSchedule: the create_schedule runner callback proposes a
+// DISABLED schedule scoped to the run's own agent, with the channel taken from
+// the run's source (not agent-chosen). It requires a valid run token, validates
+// the cron expression, and the companion list endpoint only returns the run's
+// own agent's schedules.
+func TestAgentCreateSchedule(t *testing.T) {
+	s := fullServer(t)
+	h := s.handler()
+	ctx := context.Background()
+
+	if err := s.Store.Tx(ctx, func(tx store.Tx) error {
+		if err := tx.CreateRun(store.Run{ID: "run-sch", AgentNamespace: "claw-agents", AgentName: "general",
+			SessionID: "th-1", Phase: "Running",
+			Source: `{"trigger":"slack","channel":"C0BOARD","event":"1.2","user":"U_PAT"}`}); err != nil {
+			return err
+		}
+		// A schedule owned by a DIFFERENT agent — must not leak into run-sch's list.
+		return tx.SetSchedule(store.Schedule{ID: "sch-other", AgentNamespace: "claw-agents",
+			AgentName: "other", Cron: "0 0 * * *", Prompt: "not mine", Enabled: true})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := s.Signer.Issue("run-sch", nil, time.Hour)
+
+	// Unauthenticated → 401.
+	if rr := do(t, h, "POST", "/v1/runs/run-sch/request-schedule", `{"cron":"0 13 * * *","prompt":"triage"}`); rr.Code != 401 {
+		t.Fatalf("unauthenticated = %d", rr.Code)
+	}
+	// Bad cron → 400, nothing created.
+	if rr := doAuth(t, h, "POST", "/v1/runs/run-sch/request-schedule", `{"cron":"not a cron","prompt":"x"}`, tok); rr.Code != 400 {
+		t.Fatalf("bad cron = %d, want 400", rr.Code)
+	}
+	// Valid request → 201, created disabled.
+	rr := doAuth(t, h, "POST", "/v1/runs/run-sch/request-schedule", `{"cron":"0 13 * * *","prompt":"scan Bitwave 4"}`, tok)
+	if rr.Code != 201 {
+		t.Fatalf("create = %d (%s)", rr.Code, rr.Body)
+	}
+	var created struct {
+		ID      string `json:"id"`
+		Enabled bool   `json:"enabled"`
+		Status  string `json:"status"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+	if created.Status != "requested" || created.Enabled || created.ID == "" {
+		t.Fatalf("create response = %+v, want status=requested enabled=false id!=\"\"", created)
+	}
+
+	// Stored disabled, scoped to run's agent, channel derived from the run.
+	var got store.Schedule
+	if err := s.Store.Tx(ctx, func(tx store.Tx) error {
+		g, e := tx.GetSchedule(created.ID)
+		got = g
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled {
+		t.Fatalf("schedule should be created disabled: %+v", got)
+	}
+	if got.AgentName != "general" || got.Channel != "C0BOARD" || got.Cron != "0 13 * * *" {
+		t.Fatalf("schedule = %+v, want agent=general channel=C0BOARD cron='0 13 * * *'", got)
+	}
+
+	// list endpoint returns only this run's agent's schedule, not sch-other.
+	lr := doAuth(t, h, "GET", "/v1/runs/run-sch/schedules", "", tok)
+	if lr.Code != 200 {
+		t.Fatalf("list = %d (%s)", lr.Code, lr.Body)
+	}
+	var listed []store.Schedule
+	_ = json.Unmarshal(lr.Body.Bytes(), &listed)
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("list = %+v, want only %s", listed, created.ID)
+	}
+}

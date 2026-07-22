@@ -113,9 +113,11 @@ func (s *Server) schedulesPage(w http.ResponseWriter, r *http.Request) {
 {{range .D.Schedules}}<tr>
 <td><code>{{.AgentName}}</code></td><td><code>{{.Cron}}</code></td><td>{{.Channel}}</td>
 <td class=mut><span class=snip>{{.Prompt}}</span></td>
-<td>{{if .Enabled}}yes{{else}}<span class=mut>no</span>{{end}}</td>
+<td>{{if .Enabled}}yes{{else}}<span class=mut>no (awaiting approval)</span>{{end}}</td>
 <td class=mut>{{.LastRunAt}}<br>{{.NextRunAt}}</td>
-<td><form method=post action=/ui/schedules/delete style=margin:0 onsubmit="return confirm('Delete this schedule?')">
+<td style=white-space:nowrap>{{if not .Enabled}}<form method=post action=/ui/schedules/enable style="margin:0 0 .25rem 0">
+<input type=hidden name=id value="{{.ID}}"><button>Enable</button></form>{{end}}
+<form method=post action=/ui/schedules/delete style=margin:0 onsubmit="return confirm('Delete this schedule?')">
 <input type=hidden name=id value="{{.ID}}"><button style="background:#c5221f;border-color:#c5221f">Delete</button></form></td>
 </tr>{{else}}<tr><td colspan=7 class=mut>No schedules yet.</td></tr>{{end}}</table>
 
@@ -148,5 +150,26 @@ func (s *Server) uiDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	id := r.FormValue("id")
 	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error { return tx.DeleteSchedule(id) })
+	http.Redirect(w, r, "/ui/schedules", http.StatusSeeOther)
+}
+
+// uiEnableSchedule approves an agent-requested (disabled) schedule by flipping it
+// on. This is the break-glass approval for the create_schedule agent tool: the
+// agent can only PROPOSE a disabled schedule; enabling it is a human action.
+func (s *Server) uiEnableSchedule(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	id := r.FormValue("id")
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		sc, e := tx.GetSchedule(id)
+		if e != nil {
+			return e
+		}
+		sc.Enabled = true
+		if e := tx.SetSchedule(sc); e != nil {
+			return e
+		}
+		return tx.AppendAudit(store.AuditEvent{Type: "schedule.enabled", Actor: "ui",
+			Detail: map[string]any{"schedule": id, "agent": sc.AgentName}})
+	})
 	http.Redirect(w, r, "/ui/schedules", http.StatusSeeOther)
 }

@@ -292,6 +292,7 @@ func newAgentSession(systemPrompt string) *agentSession {
 		"If a task you were asked to do needs a credential you don't have (a cloud key, an API token), DON'T give up — call the `request_secret` tool. It DMs the user a secure link to provide it, then writes it to a file in this container so you can use it.",
 		"CREDENTIAL REQUESTS INTERRUPT HUMANS: request_secret DMs a user or pings the secret's approvers. Only call it when the credential is required for a task someone explicitly asked YOU to do — never speculatively, never \"in parallel\" for a side idea, and never just because a credential is listed as available.",
 		"IMPORTANT: if you already requested a secret and the user now says they've added it / asks you to check, call `request_secret` AGAIN with the same name — that installs the value. Do NOT use bash to look for it; the value is only pulled into the container by request_secret.",
+		"You CAN run recurring work, even though this container is ephemeral: kube-claw has a scheduler that re-invokes you at a cron time. When a user asks for something \"every day / weekly / on a schedule,\" call `create_schedule` — do NOT say you're unable to run scheduled work. The schedule you create is DISABLED until a human approves it (they get a DM + a dashboard link), so tell the user it needs their approval before it starts. Each scheduled run is a FRESH invocation with no memory of this thread, so write the schedule's `prompt` self-contained. Use `list_schedules` to see or check on your schedules. (You can propose and inspect schedules, but you cannot enable or delete them — that's a human/admin action.)",
 		"When the user wants a document they can take OUT of Slack — a design doc to hand to a coding agent, a runbook, a spec — write it as full Markdown (headers/tables are fine there; the Slack-formatting rule applies only to chat replies) and call `publish_document`. It returns a time-bound share link. In your reply, always give the link, state plainly when it expires (the tool tells you), and mention that saying \"reshare\" here gets a fresh link. If the user asks to reshare/regenerate a link, call `publish_document` again with that document's `artifact_id` — do NOT resend the content.",
 		"Prefer read-only commands. This is a chat thread — you may be asked follow-up questions.")
 	sys = sys + "\n\n" + strings.Join(notes, "\n")
@@ -376,12 +377,34 @@ func newAgentSession(systemPrompt string) *agentSession {
 			Required: []string{"channel"},
 		},
 	}
+	createScheduleTool := anthropic.ToolParam{
+		Name: "create_schedule",
+		Description: anthropic.String("PROPOSE a recurring run of yourself: at each cron occurrence you are re-invoked " +
+			"with `prompt` as the message and your answer is posted to the current channel. Use this when a user asks you to " +
+			"do something \"every day / weekly / on a schedule.\" The schedule is created DISABLED and the user is DM'd an " +
+			"approval link — nothing runs until a human enables it in the dashboard. Tell the user it needs their approval to " +
+			"start. `cron` is standard 5-field UTC (minute hour day month weekday), e.g. '0 13 * * *' = 13:00 UTC daily " +
+			"(convert the user's local time to UTC yourself and state the UTC time back to them)."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"cron":   map[string]any{"type": "string", "description": "standard 5-field cron in UTC, e.g. '0 13 * * *'"},
+				"prompt": map[string]any{"type": "string", "description": "the instruction to run at each occurrence — write it self-contained, as if sent fresh (it won't have this conversation's context)"},
+			},
+			Required: []string{"cron", "prompt"},
+		},
+	}
+	listSchedulesTool := anthropic.ToolParam{
+		Name:        "list_schedules",
+		Description: anthropic.String("List your own recurring schedules (cron, prompt, channel, and whether each is enabled or still awaiting approval). Read-only. Use it to answer \"what do I have scheduled?\" or to check whether a schedule you proposed has been approved."),
+		InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}},
+	}
 	return &agentSession{
 		client: anthropic.NewClient(), // reads ANTHROPIC_API_KEY
 		model:  model,
 		sys:    sys,
 		tools: []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool},
-			{OfTool: &registerSecretTool}, {OfTool: &announceChanTool}},
+			{OfTool: &registerSecretTool}, {OfTool: &announceChanTool},
+			{OfTool: &createScheduleTool}, {OfTool: &listSchedulesTool}},
 		controllerURL: os.Getenv("CLAW_CONTROLLER_URL"),
 		runID:         os.Getenv("CLAW_RUN_ID"),
 		agentName:     os.Getenv("CLAW_AGENT_NAME"),
@@ -582,6 +605,17 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 					_ = json.Unmarshal(raw, &in)
 					s.setStep("Updating the release announcement channel…")
 					result = s.setAnnounceChannel(tctx, in.Channel)
+				case "create_schedule":
+					var in struct {
+						Cron   string `json:"cron"`
+						Prompt string `json:"prompt"`
+					}
+					_ = json.Unmarshal(raw, &in)
+					s.setStep("Proposing a schedule (" + in.Cron + " UTC)…")
+					result = s.createSchedule(tctx, in.Cron, in.Prompt)
+				case "list_schedules":
+					s.setStep("Listing schedules…")
+					result = s.listSchedules(tctx)
 				default: // bash
 					var in struct {
 						Command string `json:"command"`
@@ -1123,6 +1157,79 @@ func (s *agentSession) setAnnounceChannel(ctx context.Context, channel string) s
 		return "Release announcements to a channel are now OFF (upgrade prompts still go to the upgrade admin)."
 	}
 	return fmt.Sprintf("Done — new kube-claw releases and upgrade events will be announced in <#%s>. Remind the user the bot must be a member of that channel (/invite) or the posts will fail.", channel)
+}
+
+// createSchedule proposes a recurring invocation of this agent (create_schedule
+// tool). The controller creates it DISABLED and DMs the run's user an approval
+// link; nothing fires until a human enables it. The agent supplies only cron +
+// prompt — the controller fixes the agent/namespace/channel from the run.
+func (s *agentSession) createSchedule(ctx context.Context, cronExpr, prompt string) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "create_schedule is unavailable in this run (no controller binding)."
+	}
+	body, _ := json.Marshal(map[string]string{"cron": cronExpr, "prompt": prompt})
+	url := fmt.Sprintf("%s/v1/runs/%s/request-schedule", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodPost, url, body)
+	if err != nil {
+		return "Couldn't create the schedule: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "Couldn't create the schedule: " + readAPIError(resp)
+	}
+	var out struct {
+		ID       string `json:"id"`
+		Notified bool   `json:"notified"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out.Notified {
+		return fmt.Sprintf("Proposed a schedule (`%s` UTC) — it's created but OFF until approved. I've DM'd the user an approval link; it won't run until they enable it in the dashboard. Tell them to expect that DM.", cronExpr)
+	}
+	return fmt.Sprintf("Proposed a schedule (`%s` UTC) — it's created but OFF until approved. NOBODY was DM'd (Slack is off or the send failed), so tell the user to enable it themselves in the dashboard at /ui/schedules. It will NOT run until enabled.", cronExpr)
+}
+
+// listSchedules returns this agent's schedules (list_schedules tool), read-only.
+func (s *agentSession) listSchedules(ctx context.Context) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "list_schedules is unavailable in this run (no controller binding)."
+	}
+	url := fmt.Sprintf("%s/v1/runs/%s/schedules", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "Couldn't list schedules: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "Couldn't list schedules: " + readAPIError(resp)
+	}
+	var scheds []struct {
+		Cron, Prompt, NextRunAt string
+		Enabled                 bool
+	}
+	if json.NewDecoder(resp.Body).Decode(&scheds) != nil {
+		return "Couldn't list schedules: unexpected controller response."
+	}
+	if len(scheds) == 0 {
+		return "You have no schedules."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "You have %d schedule(s):\n", len(scheds))
+	for _, sc := range scheds {
+		state := "awaiting approval (OFF)"
+		if sc.Enabled {
+			state = "enabled"
+		}
+		next := sc.NextRunAt
+		if next == "" {
+			next = "—"
+		}
+		fmt.Fprintf(&b, "- `%s` UTC [%s], next: %s — %s\n", sc.Cron, state, next, sc.Prompt)
+	}
+	return b.String()
 }
 
 // readAPIError extracts the controller's error message for a tool result.
