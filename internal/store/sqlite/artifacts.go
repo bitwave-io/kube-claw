@@ -77,6 +77,50 @@ func (t *tx) ResolveArtifactToken(tokenHash string) (store.Artifact, string, err
 	return a, expiresAt, nil
 }
 
+// ArtifactIDByTokenHash returns the artifact id behind a share-token hash,
+// including expired and revoked tokens, or store.ErrNotFound.
+func (t *tx) ArtifactIDByTokenHash(tokenHash string) (string, error) {
+	var artifactID string
+	err := t.tx.QueryRow(
+		`SELECT artifact_id FROM artifact_tokens WHERE token_hash=?`, tokenHash,
+	).Scan(&artifactID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", store.ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return artifactID, nil
+}
+
+// ListArtifacts returns a session's documents (metadata only), oldest first.
+// With sessionID=="" it scopes to the run instead, so session-less (CLI) runs
+// see only their own documents rather than every other CLI run's.
+func (t *tx) ListArtifacts(sessionID, runID string) ([]store.Artifact, error) {
+	where, arg := `session_id=?`, sessionID
+	if sessionID == "" {
+		where, arg = `(session_id IS NULL OR session_id='') AND run_id=?`, runID
+	}
+	rows, err := t.tx.Query(
+		`SELECT id, run_id, session_id, title, created_at FROM artifacts WHERE `+where+` ORDER BY created_at, id`, arg,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.Artifact
+	for rows.Next() {
+		var a store.Artifact
+		var rID, sID sql.NullString
+		if err := rows.Scan(&a.ID, &rID, &sID, &a.Title, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		a.RunID, a.SessionID = rID.String, sID.String
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // RevokeArtifactTokens revokes all live tokens for an artifact.
 func (t *tx) RevokeArtifactTokens(artifactID string) error {
 	_, err := t.tx.Exec(

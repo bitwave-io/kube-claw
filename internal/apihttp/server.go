@@ -101,6 +101,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/outputs", s.postOutput)
 	mux.HandleFunc("POST /v1/runs/{id}/artifacts", s.publishArtifact)
+	mux.HandleFunc("GET /v1/runs/{id}/artifacts", s.listArtifacts)
 	mux.HandleFunc("POST /v1/runs/{id}/register-secret", s.agentRegisterSecret)
 	mux.HandleFunc("POST /v1/runs/{id}/announce-channel", s.agentSetAnnounceChannel)
 	mux.HandleFunc("POST /v1/runs/{id}/progress", s.postProgress)
@@ -569,9 +570,25 @@ func replyTopLevel(tx store.Tx, run store.Run, channel string) bool {
 
 type publishArtifactReq struct {
 	ArtifactID string `json:"artifactId"` // set to reshare an existing document
+	ShareURL   string `json:"shareUrl"`   // reshare alternative: a previous share link (or bare token), accepted even expired
 	Title      string `json:"title"`
 	Content    string `json:"content"` // markdown
 	TTL        string `json:"ttl"`     // Go duration, e.g. "24h"; empty = default
+}
+
+// shareURLToken extracts the raw share token from however the agent quotes a
+// previous link: a bare token, a full URL, or Slack's decorated forms
+// (<https://…/d/tok> or <https://…/d/tok|label>).
+func shareURLToken(s string) string {
+	s = strings.Trim(strings.TrimSpace(s), "<>")
+	if i := strings.IndexAny(s, "|?#"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimRight(s, "/")
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
 }
 
 // publishArtifact is the runner→controller callback behind the agent's
@@ -615,10 +632,15 @@ func (s *Server) publishArtifact(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	pub, err := s.Artifacts.Publish(r.Context(), id, run.SessionID, req.ArtifactID, req.Title, req.Content, ttl)
+	var shareToken string
+	if req.ShareURL != "" {
+		shareToken = shareURLToken(req.ShareURL)
+	}
+	pub, err := s.Artifacts.Publish(r.Context(), id, run.SessionID, req.ArtifactID, shareToken, req.Title, req.Content, ttl)
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, artifacts.ErrWrongSession):
-		// One 404 for both — an agent probing other sessions' artifact ids learns nothing.
+		// One 404 for unknown id, unknown link, and wrong session alike — an
+		// agent probing other sessions' artifacts learns nothing.
 		writeErr(w, http.StatusNotFound, "artifact not found")
 		return
 	case errors.Is(err, artifacts.ErrContentTooLarge):
@@ -633,6 +655,44 @@ func (s *Server) publishArtifact(w http.ResponseWriter, r *http.Request) {
 		"url":        s.UIBase + "/d/" + pub.Token,
 		"expiresAt":  pub.ExpiresAt.Format(time.RFC3339),
 	})
+}
+
+// listArtifacts is the runner→controller callback behind the agent's
+// list_documents tool: the session's published documents (id + title, never
+// content), so an agent whose pod was recycled can still find the artifact_id
+// it needs to reshare.
+func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.authRunInSession(r, id) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	var run store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetRun(id)
+		run = got
+		return e
+	}); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	docs, err := s.Artifacts.List(r.Context(), run.SessionID, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]map[string]string, 0, len(docs))
+	for _, d := range docs {
+		out = append(out, map[string]string{
+			"artifactId": d.ID,
+			"title":      d.Title,
+			"createdAt":  d.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"documents": out})
 }
 
 // agentRegisterSecret is the runner→controller callback behind the agent's

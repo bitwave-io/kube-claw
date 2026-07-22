@@ -292,7 +292,7 @@ func newAgentSession(systemPrompt string) *agentSession {
 		"If a task you were asked to do needs a credential you don't have (a cloud key, an API token), DON'T give up — call the `request_secret` tool. It DMs the user a secure link to provide it, then writes it to a file in this container so you can use it.",
 		"CREDENTIAL REQUESTS INTERRUPT HUMANS: request_secret DMs a user or pings the secret's approvers. Only call it when the credential is required for a task someone explicitly asked YOU to do — never speculatively, never \"in parallel\" for a side idea, and never just because a credential is listed as available.",
 		"IMPORTANT: if you already requested a secret and the user now says they've added it / asks you to check, call `request_secret` AGAIN with the same name — that installs the value. Do NOT use bash to look for it; the value is only pulled into the container by request_secret.",
-		"When the user wants a document they can take OUT of Slack — a design doc to hand to a coding agent, a runbook, a spec — write it as full Markdown (headers/tables are fine there; the Slack-formatting rule applies only to chat replies) and call `publish_document`. It returns a time-bound share link. In your reply, always give the link, state plainly when it expires (the tool tells you), and mention that saying \"reshare\" here gets a fresh link. If the user asks to reshare/regenerate a link, call `publish_document` again with that document's `artifact_id` — do NOT resend the content.",
+		"When the user wants a document they can take OUT of Slack — a design doc to hand to a coding agent, a runbook, a spec — write it as full Markdown (headers/tables are fine there; the Slack-formatting rule applies only to chat replies) and call `publish_document`. It returns a time-bound share link. In your reply, always give the link, state plainly when it expires (the tool tells you), and mention that saying \"reshare\" here gets a fresh link. If the user asks to reshare a link, call `publish_document` again with that document's `artifact_id` — or, if you don't have the id (published before your pod started), pass the OLD share link from the thread as `share_url` (works even expired), or call `list_documents` to find the id by title. Published documents are stored durably and are ALWAYS recoverable one of these ways — never regenerate a published document from scratch, and never resend its content on a reshare.",
 		"Prefer read-only commands. This is a chat thread — you may be asked follow-up questions.")
 	sys = sys + "\n\n" + strings.Join(notes, "\n")
 
@@ -337,17 +337,27 @@ func newAgentSession(systemPrompt string) *agentSession {
 		Description: anthropic.String("Publish a Markdown document (a design doc, spec, runbook) and get back a TIME-BOUND " +
 			"share link the user can hand to tools outside Slack (the URL serves the raw markdown). The result tells you the " +
 			"exact expiry — always repeat the link AND its expiry in your reply, and note that the user can say \"reshare\" " +
-			"in this thread for a fresh link. To reshare an expired/old link, call this again with the returned artifact_id " +
-			"and NO markdown — the stored document is relinked as-is (documents are immutable; to change content, publish a " +
-			"new document instead)."),
+			"in this thread for a fresh link. To reshare an expired/old link, call this again with NO markdown and either the " +
+			"returned artifact_id or (when you don't have the id) the OLD share link as share_url — the stored document is " +
+			"relinked as-is (documents are immutable; to change content, publish a new document instead). Published documents " +
+			"are stored durably: use list_documents to find one, never regenerate it."),
 		InputSchema: anthropic.ToolInputSchemaParam{
 			Properties: map[string]any{
 				"title":       map[string]any{"type": "string", "description": "short document title, e.g. \"Billing-alerts design\""},
-				"markdown":    map[string]any{"type": "string", "description": "the full document as Markdown (omit when resharing via artifact_id)"},
+				"markdown":    map[string]any{"type": "string", "description": "the full document as Markdown (omit when resharing)"},
 				"artifact_id": map[string]any{"type": "string", "description": "OPTIONAL: id of a previously published document to mint a fresh link for (revokes its old links)"},
+				"share_url": map[string]any{"type": "string", "description": "OPTIONAL: a previous share link for the document (even expired) — " +
+					"reshare handle for when you don't have the artifact_id, e.g. a link quoted earlier in this thread"},
 			},
 			Required: []string{"title"},
 		},
+	}
+	listDocsTool := anthropic.ToolParam{
+		Name: "list_documents",
+		Description: anthropic.String("List the documents published in THIS conversation (artifact_id, title, published date). " +
+			"Documents are stored durably — even ones published before your pod started. Use this to find the artifact_id for a " +
+			"publish_document reshare instead of regenerating a document you can't see."),
+		InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}},
 	}
 	registerSecretTool := anthropic.ToolParam{
 		Name: "register_secret",
@@ -381,7 +391,7 @@ func newAgentSession(systemPrompt string) *agentSession {
 		model:  model,
 		sys:    sys,
 		tools: []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool},
-			{OfTool: &registerSecretTool}, {OfTool: &announceChanTool}},
+			{OfTool: &listDocsTool}, {OfTool: &registerSecretTool}, {OfTool: &announceChanTool}},
 		controllerURL: os.Getenv("CLAW_CONTROLLER_URL"),
 		runID:         os.Getenv("CLAW_RUN_ID"),
 		agentName:     os.Getenv("CLAW_AGENT_NAME"),
@@ -563,10 +573,14 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 						Title      string `json:"title"`
 						Markdown   string `json:"markdown"`
 						ArtifactID string `json:"artifact_id"`
+						ShareURL   string `json:"share_url"`
 					}
 					_ = json.Unmarshal(raw, &in)
 					s.setStep("Publishing document \"" + in.Title + "\"…")
-					result = s.publishDocument(tctx, in.Title, in.Markdown, in.ArtifactID)
+					result = s.publishDocument(tctx, in.Title, in.Markdown, in.ArtifactID, in.ShareURL)
+				case "list_documents":
+					s.setStep("Listing published documents…")
+					result = s.listDocuments(tctx)
 				case "register_secret":
 					var in struct {
 						Name        string `json:"name"`
@@ -1041,13 +1055,14 @@ func (s *agentSession) install(ctx context.Context, name, path string, content [
 
 // publishDocument stores a markdown document via the controller and returns a
 // tool-result string carrying the share URL and its exact expiry, so the agent
-// can (and is instructed to) relay both to the user. An artifactID reshares an
-// already-published document under a fresh link, revoking the old ones.
-func (s *agentSession) publishDocument(ctx context.Context, title, markdown, artifactID string) string {
+// can (and is instructed to) relay both to the user. An artifactID or shareURL
+// (a previous link, even expired) reshares an already-published document under
+// a fresh link, revoking the old ones.
+func (s *agentSession) publishDocument(ctx context.Context, title, markdown, artifactID, shareURL string) string {
 	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
 		return "publish_document is unavailable in this run (no controller binding)."
 	}
-	body, _ := json.Marshal(map[string]string{"title": title, "content": markdown, "artifactId": artifactID})
+	body, _ := json.Marshal(map[string]string{"title": title, "content": markdown, "artifactId": artifactID, "shareUrl": shareURL})
 	url := fmt.Sprintf("%s/v1/runs/%s/artifacts", s.controllerURL, s.currentRunID())
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -1056,8 +1071,10 @@ func (s *agentSession) publishDocument(ctx context.Context, title, markdown, art
 		return "Couldn't publish the document: " + err.Error()
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound && artifactID != "" {
-		return fmt.Sprintf("No document with artifact_id %q exists in this conversation — publish it again with the full markdown instead.", artifactID)
+	if resp.StatusCode == http.StatusNotFound && (artifactID != "" || shareURL != "") {
+		return "That artifact_id/share link doesn't match any document published in this conversation. " +
+			"Call list_documents to see this conversation's published documents and reshare with the right artifact_id. " +
+			"Do NOT regenerate the document — if list_documents doesn't show it either, tell the user plainly that you can't locate it and ask how to proceed."
 	}
 	if resp.StatusCode >= 300 {
 		return "Couldn't publish the document: controller returned " + resp.Status
@@ -1073,6 +1090,41 @@ func (s *agentSession) publishDocument(ctx context.Context, title, markdown, art
 	return fmt.Sprintf("Published %q.\nShare link: %s\nLink expires: %s\nartifact_id: %s (keep for resharing)\n"+
 		"Give the user the link, tell them exactly when it expires, and that saying \"reshare\" here mints a fresh link.",
 		title, out.URL, expiry, out.ArtifactID)
+}
+
+// listDocuments returns the conversation's published documents (id + title +
+// date, never content) as a tool-result string — the recovery path for
+// resharing a document whose artifact_id died with a previous pod.
+func (s *agentSession) listDocuments(ctx context.Context) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "list_documents is unavailable in this run (no controller binding)."
+	}
+	url := fmt.Sprintf("%s/v1/runs/%s/artifacts", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "Couldn't list documents: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "Couldn't list documents: controller returned " + resp.Status
+	}
+	var out struct {
+		Documents []struct{ ArtifactID, Title, CreatedAt string }
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return "Couldn't list documents: unexpected controller response."
+	}
+	if len(out.Documents) == 0 {
+		return "No documents have been published in this conversation."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d document(s) published in this conversation (reshare any of them by calling publish_document with its artifact_id):\n", len(out.Documents))
+	for _, d := range out.Documents {
+		fmt.Fprintf(&b, "- %s — %q (published %s)\n", d.ArtifactID, d.Title, d.CreatedAt)
+	}
+	return b.String()
 }
 
 // registerSecret creates a named secret with the conversation's user as
