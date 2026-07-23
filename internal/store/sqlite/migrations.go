@@ -14,6 +14,7 @@ var additiveColumns = []string{
 	`ALTER TABLE secret_requests ADD COLUMN notified_at TEXT`,
 	`ALTER TABLE secret_requests ADD COLUMN requested_by TEXT`,
 	`ALTER TABLE intake_tokens ADD COLUMN run_id TEXT`,
+	`ALTER TABLE models ADD COLUMN max_tokens INTEGER NOT NULL DEFAULT 0`,
 }
 
 // migrations is the ordered list of schema statements (DESIGN.md §7). All are
@@ -232,6 +233,24 @@ var migrations = []string{
 		created_at  TEXT NOT NULL,
 		expires_at  TEXT NOT NULL,
 		revoked_at  TEXT
+	);`,
+	// The LLM model registry (UI-managed) + per-session (thread) overrides.
+	`CREATE TABLE IF NOT EXISTS models (
+		name           TEXT PRIMARY KEY,
+		provider       TEXT NOT NULL,
+		model_id       TEXT NOT NULL,
+		base_url       TEXT,
+		api_key_cipher BLOB,
+		notes          TEXT,
+		max_tokens     INTEGER NOT NULL DEFAULT 0,
+		is_default     INTEGER NOT NULL DEFAULT 0,
+		updated_at     TEXT NOT NULL
+	);`,
+	`CREATE TABLE IF NOT EXISTS session_models (
+		session_id TEXT PRIMARY KEY,
+		model_name TEXT NOT NULL,
+		set_by     TEXT,
+		set_at     TEXT NOT NULL
 	);`,
 	`CREATE TABLE IF NOT EXISTS channel_configs (
 		channel          TEXT PRIMARY KEY,

@@ -76,6 +76,7 @@ button{font:inherit;padding:.3rem .7rem;border:1px solid var(--accent);backgroun
 <a href=/ui/schedules class="{{if eq .Active "schedules"}}on{{end}}">Schedules</a>
 <a href=/ui/base-images class="{{if eq .Active "images"}}on{{end}}">Images</a>
 <a href=/ui/prompts class="{{if eq .Active "prompts"}}on{{end}}">Prompts</a>
+<a href=/ui/models class="{{if eq .Active "models"}}on{{end}}">Models</a>
 <a href=/ui/channels class="{{if eq .Active "channels"}}on{{end}}">Channels</a>
 <a href=/ui/settings class="{{if eq .Active "settings"}}on{{end}}">Settings</a>
 </nav><main><h1>{{.Title}}</h1>`

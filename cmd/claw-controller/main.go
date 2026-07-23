@@ -34,6 +34,7 @@ import (
 	"github.com/traego/kube-claw/internal/controller"
 	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
+	"github.com/traego/kube-claw/internal/models"
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/runengine"
 	"github.com/traego/kube-claw/internal/scheduler"
@@ -130,6 +131,7 @@ func main() {
 		os.Exit(1)
 	}
 	secSvc := &secrets.Service{Store: st, Cipher: cipher}
+	modelSvc := &models.Service{Store: st, Cipher: cipher}
 
 	// Agent identity: K8s SA TokenReview verifier + claw session-token signer.
 	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
@@ -233,6 +235,7 @@ func main() {
 		Approvals:             approvalSvc,
 		Artifacts:             artifactSvc,
 		GitRepos:              gitRepoSvc,
+		Models:                modelSvc,
 		Router:                slackRt,
 		Notifier:              slackNotifier,
 		AdminPassword:         os.Getenv("CLAW_ADMIN_PASSWORD"),

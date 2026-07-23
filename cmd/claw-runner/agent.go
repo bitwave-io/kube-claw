@@ -28,8 +28,27 @@ const noReply = "NO_REPLY"
 // adaptive thinking, bash + request_secret tools) whose message history persists
 // across turns in memory — so follow-ups continue the same conversation.
 type agentSession struct {
-	client        anthropic.Client
-	model         anthropic.Model
+	client anthropic.Client
+	model  anthropic.Model
+
+	// Registry-resolved provider config, refreshed from the controller each
+	// turn (and after switch_model). Empty provider = legacy env config,
+	// which is the Anthropic client built at session start.
+	modelProvider  string
+	modelName      string // registry handle users switch by, e.g. "gpt5"
+	modelID        string
+	modelBaseURL   string
+	modelAPIKey    string
+	modelMaxTokens int             // registry per-model output cap; 0 = provider default
+	modelAvail     string          // formatted registry listing for switch_model
+	oaTokenParam   string          // cap parameter the endpoint accepts ("" = not yet probed; see openaiStream)
+	envModel       anthropic.Model // CLAW_MODEL fallback for when the registry stops resolving
+
+	// holdThinking suppresses thinking for the rest of the turn after a
+	// mid-turn model switch: the history's last assistant message then lacks
+	// a thinking block (openai-synthesized) or carries one signed by the old
+	// model, and Anthropic rejects such tool-use continuations with thinking on.
+	holdThinking  bool
 	sys           string
 	tools         []anthropic.ToolUnionParam
 	messages      []anthropic.MessageParam
@@ -353,6 +372,19 @@ func newAgentSession(systemPrompt string) *agentSession {
 			Required: []string{"title"},
 		},
 	}
+	switchModelTool := anthropic.ToolParam{
+		Name: "switch_model",
+		Description: anthropic.String("Switch THIS conversation to another configured model, or list what's available. " +
+			"Call with no arguments to see the registry (names, providers, notes). Call with {\"model\":\"<name>\"} to " +
+			"switch — it takes effect immediately (the rest of this reply included), persists for this thread, and is " +
+			"audited. Only models an operator registered in the admin UI are reachable. Use it when a user asks for a " +
+			"different / smarter / cheaper / self-hosted model."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"model": map[string]any{"type": "string", "description": "registered model name to switch to; omit to list the options"},
+			},
+		},
+	}
 	listDocsTool := anthropic.ToolParam{
 		Name: "list_documents",
 		Description: anthropic.String("List the documents published in THIS conversation (artifact_id, title, published date). " +
@@ -409,12 +441,13 @@ func newAgentSession(systemPrompt string) *agentSession {
 		InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}},
 	}
 	return &agentSession{
-		client: anthropic.NewClient(), // reads ANTHROPIC_API_KEY
-		model:  model,
-		sys:    sys,
+		client:   anthropic.NewClient(), // reads ANTHROPIC_API_KEY
+		model:    model,
+		envModel: model,
+		sys:      sys,
 		tools: []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool},
 			{OfTool: &listDocsTool}, {OfTool: &registerSecretTool}, {OfTool: &announceChanTool},
-			{OfTool: &createScheduleTool}, {OfTool: &listSchedulesTool}},
+			{OfTool: &createScheduleTool}, {OfTool: &listSchedulesTool}, {OfTool: &switchModelTool}},
 		controllerURL: os.Getenv("CLAW_CONTROLLER_URL"),
 		runID:         os.Getenv("CLAW_RUN_ID"),
 		agentName:     os.Getenv("CLAW_AGENT_NAME"),
@@ -514,6 +547,8 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 	s.compactHistory()
 	s.messages = append(s.messages, anthropic.NewUserMessage(anthropic.NewTextBlock(userText)))
 	s.turnInTokens, s.turnOutTokens = 0, 0
+	s.holdThinking = false // a fresh turn's history ends on a user message — thinking is safe again
+	s.refreshModelConfig(ctx)
 	adaptive := anthropic.ThinkingConfigAdaptiveParam{}
 
 	// Everything in this turn — model calls, bash, approval waits, heartbeat —
@@ -549,17 +584,20 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 	var final []string
 	for { // the turn's ctx deadline (see main.go) bounds the agentic loop
 		markCacheBreakpoint(s.messages)
-		resp, err := s.callModel(tctx, anthropic.MessageNewParams{
+		params := anthropic.MessageNewParams{
 			Model:     s.model,
-			MaxTokens: 32000,
+			MaxTokens: s.maxOutputTokens(),
 			System: []anthropic.TextBlockParam{
 				// Breakpoint here caches the tools + system prefix across calls.
 				{Text: s.sys, CacheControl: anthropic.NewCacheControlEphemeralParam()},
 			},
-			Thinking: anthropic.ThinkingConfigParamUnion{OfAdaptive: &adaptive},
 			Tools:    s.tools,
 			Messages: s.messages,
-		})
+		}
+		if !s.holdThinking {
+			params.Thinking = anthropic.ThinkingConfigParamUnion{OfAdaptive: &adaptive}
+		}
+		resp, err := s.callModel(tctx, params)
 		if err != nil {
 			// A user stop cancelled tctx mid-call: close the turn cleanly with a
 			// short acknowledgement instead of surfacing a cancellation error.
@@ -595,6 +633,12 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 					_ = json.Unmarshal(raw, &in)
 					s.setStep("Requesting credential " + in.Name + "…")
 					result = s.requestSecret(tctx, in.Name, in.Description, in.Reason, in.EnvVar)
+				case "switch_model":
+					var in struct {
+						Model string `json:"model"`
+					}
+					_ = json.Unmarshal(raw, &in)
+					result = s.switchModel(tctx, in.Model)
 				case "publish_document":
 					var in struct {
 						Title      string `json:"title"`
@@ -804,6 +848,16 @@ func (s *agentSession) compactHistory() {
 	}
 }
 
+// maxOutputTokens is the per-call output cap: the registry's per-model value
+// when set, else the 32k Anthropic default. The OpenAI adapter reads the
+// registry value directly and omits the cap entirely when unset (openai.go).
+func (s *agentSession) maxOutputTokens() int64 {
+	if s.modelMaxTokens > 0 {
+		return int64(s.modelMaxTokens)
+	}
+	return 32000
+}
+
 // callModel calls Claude with visible retry-with-backoff: on a (usually transient,
 // e.g. network/DNS) failure it posts "…retrying in Xs…" to the thread and waits,
 // up to a few attempts, before giving up so the caller can report a clean failure.
@@ -828,6 +882,10 @@ func (s *agentSession) callModel(ctx context.Context, params anthropic.MessageNe
 		if errors.As(err, &apiErr) && !retryableStatus(apiErr.StatusCode) {
 			return nil, lastErr
 		}
+		var provErr *httpStatusError
+		if errors.As(err, &provErr) && !retryableStatus(provErr.code) {
+			return nil, lastErr
+		}
 		if attempt >= len(backoffs) {
 			return nil, lastErr
 		}
@@ -848,6 +906,9 @@ func (s *agentSession) callModel(ctx context.Context, params anthropic.MessageNe
 // requests that could outlive its 10-minute generation cap ("streaming is
 // required for operations that may take longer than 10 minutes").
 func (s *agentSession) streamModel(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	if s.modelProvider == "openai" {
+		return s.openaiStream(ctx, params)
+	}
 	stream := s.client.Messages.NewStreaming(ctx, params)
 	msg := anthropic.Message{}
 	for stream.Next() {
