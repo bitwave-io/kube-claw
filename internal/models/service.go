@@ -30,11 +30,12 @@ type Service struct {
 // turn. APIKey is plaintext — it travels the same in-cluster, run-token-authed
 // channel as secret materialization.
 type Resolved struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
-	ModelID  string `json:"modelId"`
-	BaseURL  string `json:"baseUrl,omitempty"`
-	APIKey   string `json:"apiKey,omitempty"`
+	Name      string `json:"name"`
+	Provider  string `json:"provider"`
+	ModelID   string `json:"modelId"`
+	BaseURL   string `json:"baseUrl,omitempty"`
+	APIKey    string `json:"apiKey,omitempty"`
+	MaxTokens int    `json:"maxTokens,omitempty"` // per-call output cap; 0 = provider default
 	// Source records why this model was picked: "session" (thread override)
 	// or "default" (install default).
 	Source string `json:"source"`
@@ -42,7 +43,11 @@ type Resolved struct {
 
 // Upsert validates and stores a model configuration. apiKey semantics: ""
 // keeps any existing stored key (create with no key = keyless endpoint).
-func (s *Service) Upsert(ctx context.Context, m store.Model, apiKey string) error {
+// makeDefault marks the model as the install default; the very first model
+// registered becomes the default regardless (sessions must always resolve
+// somewhere) — both inside the same transaction as the upsert, so the
+// registry can never hold models with no default.
+func (s *Service) Upsert(ctx context.Context, m store.Model, apiKey string, makeDefault bool) error {
 	m.Name = strings.TrimSpace(m.Name)
 	m.Provider = strings.ToLower(strings.TrimSpace(m.Provider))
 	m.ModelID = strings.TrimSpace(m.ModelID)
@@ -56,6 +61,9 @@ func (s *Service) Upsert(ctx context.Context, m store.Model, apiKey string) erro
 	if m.ModelID == "" {
 		return fmt.Errorf("modelId is required")
 	}
+	if m.MaxTokens < 0 {
+		return fmt.Errorf("maxTokens must be positive (or 0 for the provider default)")
+	}
 	if apiKey != "" {
 		ct, err := s.Cipher.Encrypt([]byte(apiKey), []byte(keyAD))
 		if err != nil {
@@ -67,8 +75,20 @@ func (s *Service) Upsert(ctx context.Context, m store.Model, apiKey string) erro
 		if err := tx.UpsertModel(m); err != nil {
 			return err
 		}
+		if !makeDefault {
+			all, err := tx.ListModels()
+			if err != nil {
+				return err
+			}
+			makeDefault = len(all) == 1
+		}
+		if makeDefault {
+			if err := tx.SetDefaultModel(m.Name); err != nil {
+				return err
+			}
+		}
 		return tx.AppendAudit(store.AuditEvent{Type: "model.upserted", Actor: "admin",
-			Detail: map[string]any{"model": m.Name, "provider": m.Provider}})
+			Detail: map[string]any{"model": m.Name, "provider": m.Provider, "default": makeDefault}})
 	})
 }
 
@@ -160,7 +180,7 @@ func (s *Service) Resolve(ctx context.Context, sessionID string) (Resolved, erro
 	if err != nil {
 		return Resolved{}, err
 	}
-	out := Resolved{Name: m.Name, Provider: m.Provider, ModelID: m.ModelID, BaseURL: m.BaseURL, Source: source}
+	out := Resolved{Name: m.Name, Provider: m.Provider, ModelID: m.ModelID, BaseURL: m.BaseURL, MaxTokens: m.MaxTokens, Source: source}
 	if len(m.APIKeyCiphertext) > 0 {
 		pt, err := s.Cipher.Decrypt(m.APIKeyCiphertext, []byte(keyAD))
 		if err != nil {

@@ -24,9 +24,12 @@ type modelChoice struct {
 }
 
 // refreshModelConfig resolves the session's model from the controller's
-// registry. 404 (no registry) or any error keeps the current config — a fresh
-// install without registered models runs on the legacy env client, and a
-// transient controller blip must never mid-flight-break a working session.
+// registry. Transient errors (network, 5xx) keep the current config — a
+// controller blip must never mid-flight-break a working session. A 404 is
+// authoritative, not transient: the registry no longer resolves a model for
+// this session (deleted, or emptied), so a session on a registry model falls
+// back to the legacy env client — holding on to the old endpoint and API key
+// would make deleting a model useless as revocation.
 func (s *agentSession) refreshModelConfig(ctx context.Context) {
 	if s.controllerURL == "" || s.runID == "" {
 		return
@@ -36,16 +39,28 @@ func (s *agentSession) refreshModelConfig(ctx context.Context) {
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		s.modelAvail = ""
+		if s.modelName != "" {
+			s.modelName, s.modelProvider, s.modelID, s.modelBaseURL, s.modelAPIKey = "", "", "", "", ""
+			s.modelMaxTokens, s.oaTokenParam = 0, ""
+			s.client = anthropic.NewClient() // reads ANTHROPIC_API_KEY
+			s.model = s.envModel
+			fmt.Println("claw-runner: session model → legacy env config (registry no longer resolves)")
+		}
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		return
 	}
 	var out struct {
 		Model struct {
-			Name     string `json:"name"`
-			Provider string `json:"provider"`
-			ModelID  string `json:"modelId"`
-			BaseURL  string `json:"baseUrl"`
-			APIKey   string `json:"apiKey"`
+			Name      string `json:"name"`
+			Provider  string `json:"provider"`
+			ModelID   string `json:"modelId"`
+			BaseURL   string `json:"baseUrl"`
+			APIKey    string `json:"apiKey"`
+			MaxTokens int    `json:"maxTokens"`
 		} `json:"model"`
 		Available []modelChoice `json:"available"`
 	}
@@ -69,11 +84,13 @@ func (s *agentSession) refreshModelConfig(ctx context.Context) {
 
 	m := out.Model
 	if m.Name == s.modelName && m.Provider == s.modelProvider && m.ModelID == s.modelID &&
-		m.BaseURL == s.modelBaseURL && m.APIKey == s.modelAPIKey {
+		m.BaseURL == s.modelBaseURL && m.APIKey == s.modelAPIKey && m.MaxTokens == s.modelMaxTokens {
 		return // unchanged
 	}
 	s.modelName, s.modelProvider, s.modelID, s.modelBaseURL, s.modelAPIKey =
 		m.Name, m.Provider, m.ModelID, m.BaseURL, m.APIKey
+	s.modelMaxTokens = m.MaxTokens
+	s.oaTokenParam = "" // re-probe the cap parameter against the new endpoint
 	if m.Provider == "anthropic" {
 		opts := []option.RequestOption{}
 		if m.APIKey != "" {
@@ -115,7 +132,19 @@ func (s *agentSession) switchModel(ctx context.Context, name string) string {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Sprintf("switch failed (HTTP %d)", resp.StatusCode)
 	}
+	prevProvider, prevModelID := s.modelProvider, s.modelID
 	s.refreshModelConfig(ctx)
+	if s.modelName != name {
+		// The pin persisted but this session couldn't reload its config —
+		// don't confirm a switch that hasn't taken effect.
+		return fmt.Sprintf("The switch to %q was recorded, but the session couldn't reload its model config yet — it takes effect on the next message.", name)
+	}
+	if s.modelProvider != prevProvider || s.modelID != prevModelID {
+		// The rest of this turn continues on the new model over a history
+		// written by the old one — see holdThinking for why thinking must
+		// stay off until the next turn.
+		s.holdThinking = true
+	}
 	return fmt.Sprintf("Switched this conversation to %s (%s: %s) — effective immediately, including the rest of this reply.",
 		s.modelName, s.modelProvider, s.modelID)
 }

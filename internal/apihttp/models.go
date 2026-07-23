@@ -45,27 +45,25 @@ func (s *Server) upsertModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Name     string `json:"name"`
-		Provider string `json:"provider"`
-		ModelID  string `json:"modelId"`
-		BaseURL  string `json:"baseUrl"`
-		APIKey   string `json:"apiKey"`
-		Notes    string `json:"notes"`
-		Default  bool   `json:"default"`
+		Name      string `json:"name"`
+		Provider  string `json:"provider"`
+		ModelID   string `json:"modelId"`
+		BaseURL   string `json:"baseUrl"`
+		APIKey    string `json:"apiKey"`
+		MaxTokens int    `json:"maxTokens"`
+		Notes     string `json:"notes"`
+		Default   bool   `json:"default"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
 		return
 	}
-	m := store.Model{Name: in.Name, Provider: in.Provider, ModelID: in.ModelID, BaseURL: in.BaseURL, Notes: in.Notes}
-	if err := s.Models.Upsert(r.Context(), m, in.APIKey); err != nil {
+	m := store.Model{Name: in.Name, Provider: in.Provider, ModelID: in.ModelID, BaseURL: in.BaseURL, MaxTokens: in.MaxTokens, Notes: in.Notes}
+	// Default assignment (explicit, or first-model-registered) happens inside
+	// the service's transaction — the registry can never end up default-less.
+	if err := s.Models.Upsert(r.Context(), m, in.APIKey, in.Default); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	// First model registered becomes the default automatically; an explicit
-	// default=true also applies.
-	if list, err := s.Models.List(r.Context()); err == nil && (in.Default || len(list) == 1) {
-		_ = s.Models.SetDefault(r.Context(), strings.TrimSpace(in.Name))
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

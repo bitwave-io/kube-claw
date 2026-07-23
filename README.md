@@ -229,6 +229,9 @@ via pod env. Any thread can switch among *registered* models by just asking
 the agent; the reply footer's model tag confirms what actually served. With no
 models registered, the runner uses the legacy env config
 (`claw-anthropic-key` + `CLAW_MODEL`), so existing installs upgrade cleanly.
+Each model takes an optional **max output tokens** cap — leave it blank to use
+the provider's own limit (recommended for self-hosted engines), or set it for
+models whose context window is smaller than the 32k Anthropic default.
 
 ### Secret authority
 

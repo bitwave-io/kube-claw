@@ -549,9 +549,14 @@ type Model struct {
 	// APIKeyCiphertext is the AEAD-encrypted API key; empty for keyless
 	// self-hosted endpoints. Never serialized to JSON.
 	APIKeyCiphertext []byte `json:"-"`
-	Notes            string `json:"notes,omitempty"`
-	IsDefault        bool   `json:"isDefault"`
-	UpdatedAt        string `json:"updatedAt"`
+	// MaxTokens caps output tokens per model call. 0 = provider default: the
+	// runner omits the cap for OpenAI-compatible endpoints (whose engines
+	// reject caps beyond their context) and applies its built-in Anthropic
+	// default. Set it for models whose context is smaller than that default.
+	MaxTokens int    `json:"maxTokens,omitempty"`
+	Notes     string `json:"notes,omitempty"`
+	IsDefault bool   `json:"isDefault"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 // ModelProviders are the accepted Model.Provider values.

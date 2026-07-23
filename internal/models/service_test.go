@@ -40,15 +40,16 @@ func TestModelServiceResolution(t *testing.T) {
 		t.Fatalf("empty registry resolve = %v, want ErrNotFound", err)
 	}
 
-	// Register two models; keys encrypt at rest and decrypt on resolve.
-	if err := svc.Upsert(ctx, store.Model{Name: "opus", Provider: "anthropic", ModelID: "claude-opus-4-8"}, "sk-ant-secret"); err != nil {
+	// Register two models; keys encrypt at rest and decrypt on resolve. The
+	// first registered model becomes the default inside the same transaction.
+	if err := svc.Upsert(ctx, store.Model{Name: "opus", Provider: "anthropic", ModelID: "claude-opus-4-8"}, "sk-ant-secret", false); err != nil {
 		t.Fatal(err)
+	}
+	if r, err := svc.Resolve(ctx, "thread1"); err != nil || r.Name != "opus" {
+		t.Fatalf("first model must become the default: %+v, %v", r, err)
 	}
 	if err := svc.Upsert(ctx, store.Model{Name: "local", Provider: "openai", ModelID: "llama-4",
-		BaseURL: "http://vllm.internal/v1"}, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.SetDefault(ctx, "opus"); err != nil {
+		BaseURL: "http://vllm.internal/v1", MaxTokens: 8192}, "", false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,7 +72,8 @@ func TestModelServiceResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, err = svc.Resolve(ctx, "thread1")
-	if err != nil || r.Name != "local" || r.Source != "session" || r.APIKey != "" || r.BaseURL != "http://vllm.internal/v1" {
+	if err != nil || r.Name != "local" || r.Source != "session" || r.APIKey != "" ||
+		r.BaseURL != "http://vllm.internal/v1" || r.MaxTokens != 8192 {
 		t.Fatalf("session resolve = %+v, %v", r, err)
 	}
 	// Other sessions still get the default.
@@ -89,11 +91,23 @@ func TestModelServiceResolution(t *testing.T) {
 		t.Fatalf("deleting the default must be refused, got %v", err)
 	}
 
-	// Validation: bad provider, spacey name.
-	if err := svc.Upsert(ctx, store.Model{Name: "x", Provider: "gemini", ModelID: "y"}, ""); err == nil {
+	// Explicit default=true moves the default (same transaction as the upsert).
+	if err := svc.Upsert(ctx, store.Model{Name: "local", Provider: "openai", ModelID: "llama-4",
+		BaseURL: "http://vllm.internal/v1"}, "", true); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := svc.Resolve(ctx, "thread2"); r.Name != "local" {
+		t.Fatalf("default must have moved to local, got %+v", r)
+	}
+
+	// Validation: bad provider, spacey name, negative cap.
+	if err := svc.Upsert(ctx, store.Model{Name: "x", Provider: "gemini", ModelID: "y"}, "", false); err == nil {
 		t.Fatal("unknown provider must be rejected")
 	}
-	if err := svc.Upsert(ctx, store.Model{Name: "two words", Provider: "openai", ModelID: "y"}, ""); err == nil {
+	if err := svc.Upsert(ctx, store.Model{Name: "two words", Provider: "openai", ModelID: "y"}, "", false); err == nil {
 		t.Fatal("spacey name must be rejected")
+	}
+	if err := svc.Upsert(ctx, store.Model{Name: "x", Provider: "openai", ModelID: "y", MaxTokens: -1}, "", false); err == nil {
+		t.Fatal("negative maxTokens must be rejected")
 	}
 }

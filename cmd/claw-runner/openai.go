@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,7 +59,11 @@ type oaToolCall struct {
 
 // oaRequest translates MessageNewParams into an OpenAI chat.completions body.
 // Anthropic-only concepts (adaptive thinking, cache control) are dropped.
-func oaRequest(params anthropic.MessageNewParams, modelID string, official bool) (map[string]any, error) {
+// tokenParam names the output-cap parameter (max_tokens vs
+// max_completion_tokens — see openaiStream); maxTokens 0 omits the cap so the
+// endpoint applies its own model limit (params.MaxTokens is the Anthropic
+// default, far above what many self-hosted models accept).
+func oaRequest(params anthropic.MessageNewParams, modelID, tokenParam string, maxTokens int64, includeUsage bool) (map[string]any, error) {
 	msgs := []oaMessage{}
 	for _, sys := range params.System {
 		if strings.TrimSpace(sys.Text) != "" {
@@ -151,13 +156,11 @@ func oaRequest(params anthropic.MessageNewParams, modelID string, official bool)
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
-	// api.openai.com rejects max_tokens on newer models (wants
-	// max_completion_tokens); most self-hosted engines only know max_tokens.
-	if official {
-		body["max_completion_tokens"] = params.MaxTokens
+	if maxTokens > 0 {
+		body[tokenParam] = maxTokens
+	}
+	if includeUsage {
 		body["stream_options"] = map[string]any{"include_usage": true}
-	} else {
-		body["max_tokens"] = params.MaxTokens
 	}
 	return body, nil
 }
@@ -192,13 +195,49 @@ func contentText(raw json.RawMessage) string {
 // openaiStream makes one chat.completions call over SSE and synthesizes the
 // accumulated result into an anthropic.Message via its canonical wire JSON —
 // downstream (history, tool dispatch, usage footer) is provider-blind.
+//
+// The output-cap parameter is named max_completion_tokens on api.openai.com
+// and max_tokens on most self-hosted engines — but gateways and proxies front
+// both, so the base URL only seeds a guess: a 400 that names the parameter
+// flips it once and the working choice sticks for the session.
 func (s *agentSession) openaiStream(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
 	base := strings.TrimRight(s.modelBaseURL, "/")
 	official := base == "" || base == defaultOpenAIBaseURL
 	if base == "" {
 		base = defaultOpenAIBaseURL
 	}
-	body, err := oaRequest(params, s.modelID, official)
+	tokenParam := s.oaTokenParam
+	if tokenParam == "" {
+		tokenParam = "max_tokens"
+		if official {
+			tokenParam = "max_completion_tokens"
+		}
+	}
+	for {
+		msg, err := s.openaiStreamOnce(ctx, params, base, tokenParam, official)
+		var httpErr *httpStatusError
+		if err != nil && s.oaTokenParam == "" && errors.As(err, &httpErr) &&
+			httpErr.code == http.StatusBadRequest && strings.Contains(httpErr.body, tokenParam) {
+			if tokenParam == "max_tokens" {
+				tokenParam = "max_completion_tokens"
+			} else {
+				tokenParam = "max_tokens"
+			}
+			s.oaTokenParam = tokenParam // one flip only; a second 400 surfaces
+			continue
+		}
+		if err == nil {
+			s.oaTokenParam = tokenParam
+		}
+		return msg, err
+	}
+}
+
+func (s *agentSession) openaiStreamOnce(ctx context.Context, params anthropic.MessageNewParams, base, tokenParam string, official bool) (*anthropic.Message, error) {
+	// The registry's per-model cap; 0 omits the parameter so the endpoint
+	// applies its own limit (sending Anthropic's 32k default gets a permanent
+	// 400 from engines whose context is smaller).
+	body, err := oaRequest(params, s.modelID, tokenParam, int64(s.modelMaxTokens), official)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +264,7 @@ func (s *agentSession) openaiStream(ctx context.Context, params anthropic.Messag
 	toolCalls := map[int]*oaToolCall{}
 	served := s.modelID
 	finish := ""
+	nextIdx := 0
 	var inTok, outTok int64
 
 	sc := bufio.NewScanner(resp.Body)
@@ -251,9 +291,19 @@ func (s *agentSession) openaiStream(ctx context.Context, params anthropic.Messag
 				PromptTokens     int64 `json:"prompt_tokens"`
 				CompletionTokens int64 `json:"completion_tokens"`
 			} `json:"usage"`
+			Error *struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+			} `json:"error"`
 		}
 		if json.Unmarshal([]byte(data), &chunk) != nil {
 			continue // tolerate non-JSON keepalives from lenient servers
+		}
+		// Post-200 failures (rate-limit aborts, content filters) arrive as an
+		// in-stream error event; swallowing it would synthesize an empty
+		// message and lose the provider's actual complaint.
+		if chunk.Error != nil {
+			return nil, fmt.Errorf("provider stream error: %s", chunk.Error.Message)
 		}
 		if chunk.Model != "" {
 			served = chunk.Model
@@ -267,10 +317,22 @@ func (s *agentSession) openaiStream(ctx context.Context, params anthropic.Messag
 			}
 			text.WriteString(c.Delta.Content)
 			for _, tc := range c.Delta.ToolCalls {
-				cur, ok := toolCalls[tc.Index]
+				idx := tc.Index
+				if idx >= nextIdx {
+					nextIdx = idx + 1
+				}
+				// Lenient servers deliver complete tool calls with no index
+				// (JSON zero-value): a distinct id landing on an occupied slot
+				// is a NEW call, not a continuation — merging would overwrite
+				// the first call and concatenate their argument JSON.
+				if cur, ok := toolCalls[idx]; ok && tc.ID != "" && cur.ID != "" && cur.ID != tc.ID {
+					idx = nextIdx
+					nextIdx++
+				}
+				cur, ok := toolCalls[idx]
 				if !ok {
 					cp := tc
-					toolCalls[tc.Index] = &cp
+					toolCalls[idx] = &cp
 					continue
 				}
 				if tc.ID != "" {
@@ -298,20 +360,42 @@ func (s *agentSession) openaiStream(ctx context.Context, params anthropic.Messag
 		idxs = append(idxs, i)
 	}
 	sort.Ints(idxs)
-	for n, i := range idxs {
+	toolUses := 0
+	for _, i := range idxs {
 		tc := toolCalls[i]
-		var input map[string]any
-		if json.Unmarshal([]byte(tc.Function.Arguments), &input) != nil || input == nil {
-			input = map[string]any{}
+		input := map[string]any{}
+		if args := strings.TrimSpace(tc.Function.Arguments); args != "" {
+			if json.Unmarshal([]byte(args), &input) != nil || input == nil {
+				if finish == "length" {
+					// Cut off mid-arguments — dropping the call (instead of
+					// executing it with empty input) lets the max_tokens
+					// continuation below re-issue it whole.
+					continue
+				}
+				return nil, fmt.Errorf("provider sent unparseable arguments for tool %s: %s", tc.Function.Name, firstLine([]byte(args)))
+			}
 		}
 		id := tc.ID
 		if id == "" {
-			id = fmt.Sprintf("call_%d", n)
+			id = fmt.Sprintf("call_%d", toolUses)
 		}
 		content = append(content, map[string]any{"type": "tool_use", "id": id, "name": tc.Function.Name, "input": input})
+		toolUses++
+	}
+	// An empty assistant message must never enter history: the loop would
+	// store it, and every later Anthropic call on this session 400s on the
+	// empty content — erroring here lets callModel retry instead.
+	if len(content) == 0 {
+		return nil, fmt.Errorf("provider returned an empty completion (finish_reason %q)", finish)
 	}
 	stop := "end_turn"
-	if len(toolCalls) > 0 || finish == "tool_calls" {
+	switch {
+	case finish == "length":
+		// Surfacing max_tokens (instead of a final-looking end_turn) lets the
+		// loop take its continuation branch rather than posting a truncated
+		// reply as the answer.
+		stop = "max_tokens"
+	case toolUses > 0 || finish == "tool_calls":
 		stop = "tool_use"
 	}
 	wire, err := json.Marshal(map[string]any{
