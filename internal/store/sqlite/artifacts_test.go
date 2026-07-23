@@ -90,4 +90,70 @@ func TestArtifactsAndShareTokens(t *testing.T) {
 		}
 		return nil
 	})
+
+	// ArtifactIDByTokenHash resolves expired AND revoked tokens (reshare-by-old-link).
+	tx(func(tx store.Tx) error {
+		for _, h := range []string{"hash-live", "hash-old"} {
+			if id, err := tx.ArtifactIDByTokenHash(h); err != nil || id != "doc-1" {
+				t.Fatalf("ArtifactIDByTokenHash(%q) = %q, %v", h, id, err)
+			}
+		}
+		if _, err := tx.ArtifactIDByTokenHash("hash-nope"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("unknown hash = %v, want ErrNotFound", err)
+		}
+		return nil
+	})
+}
+
+func TestListArtifacts(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "claw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tx := func(fn func(store.Tx) error) {
+		t.Helper()
+		if err := s.Tx(ctx, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tx(func(tx store.Tx) error {
+		for _, a := range []store.Artifact{
+			{ID: "doc-1", RunID: "run-1", SessionID: "th-1", Title: "First", Content: "1", CreatedAt: "2026-07-17T10:00:00Z"},
+			{ID: "doc-2", RunID: "run-2", SessionID: "th-1", Title: "Second", Content: "2", CreatedAt: "2026-07-18T10:00:00Z"},
+			{ID: "doc-3", RunID: "run-3", SessionID: "th-2", Title: "Other thread", Content: "3", CreatedAt: "2026-07-18T11:00:00Z"},
+			{ID: "doc-4", RunID: "run-cli", SessionID: "", Title: "CLI doc", Content: "4", CreatedAt: "2026-07-18T12:00:00Z"},
+		} {
+			if err := tx.CreateArtifact(a); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	tx(func(tx store.Tx) error {
+		docs, err := tx.ListArtifacts("th-1", "run-ignored")
+		if err != nil {
+			return err
+		}
+		if len(docs) != 2 || docs[0].ID != "doc-1" || docs[1].ID != "doc-2" {
+			t.Fatalf("session list = %+v", docs)
+		}
+		if docs[0].Title != "First" || docs[0].Content != "" {
+			t.Fatalf("list entry = %+v, want metadata only", docs[0])
+		}
+		// Session-less scoping falls back to the run — no cross-CLI leakage.
+		if docs, err := tx.ListArtifacts("", "run-cli"); err != nil || len(docs) != 1 || docs[0].ID != "doc-4" {
+			t.Fatalf("CLI list = %+v, %v", docs, err)
+		}
+		if docs, err := tx.ListArtifacts("", "run-1"); err != nil || len(docs) != 0 {
+			t.Fatalf("CLI list for session run = %+v, %v", docs, err)
+		}
+		return nil
+	})
 }

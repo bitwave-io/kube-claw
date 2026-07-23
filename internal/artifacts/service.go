@@ -50,14 +50,24 @@ type Published struct {
 // names an existing artifact (a reshare), the stored content is kept, its live
 // tokens are revoked, and a fresh token is minted — but only when the artifact
 // belongs to the caller's session, so one thread's agent can't relink another's.
+// A reshare can also name the document by shareToken — the raw token from a
+// previous share link, accepted even expired/revoked, because the old link in
+// the thread is the one handle that survives the agent pod being recycled.
 // ttl <= 0 uses the default; anything above MaxTTL is clamped.
-func (s *Service) Publish(ctx context.Context, runID, sessionID, artifactID, title, content string, ttl time.Duration) (Published, error) {
+func (s *Service) Publish(ctx context.Context, runID, sessionID, artifactID, shareToken, title, content string, ttl time.Duration) (Published, error) {
 	ttl = s.clampTTL(ttl)
 	raw := randomToken()
 	expires := time.Now().UTC().Add(ttl)
 
-	pub := Published{ArtifactID: artifactID, Token: raw, ExpiresAt: expires}
+	pub := Published{Token: raw, ExpiresAt: expires}
 	err := s.Store.Tx(ctx, func(tx store.Tx) error {
+		if artifactID == "" && shareToken != "" {
+			id, err := tx.ArtifactIDByTokenHash(hashToken(shareToken))
+			if err != nil {
+				return err
+			}
+			artifactID = id
+		}
 		if artifactID != "" {
 			a, err := tx.GetArtifact(artifactID)
 			if err != nil {
@@ -72,8 +82,10 @@ func (s *Service) Publish(ctx context.Context, runID, sessionID, artifactID, tit
 			if err := tx.CreateArtifactToken(hashToken(raw), artifactID, expires.Format(time.RFC3339Nano)); err != nil {
 				return err
 			}
+			pub.ArtifactID = artifactID
 			return tx.AppendAudit(store.AuditEvent{Type: "artifact.reshared", RunID: runID,
-				Detail: map[string]any{"artifact": artifactID, "expiresAt": expires.Format(time.RFC3339)}})
+				Detail: map[string]any{"artifact": artifactID, "viaLink": shareToken != "",
+					"expiresAt": expires.Format(time.RFC3339)}})
 		}
 		if strings.TrimSpace(title) == "" || strings.TrimSpace(content) == "" {
 			return errors.New("artifacts: title and content are required")
@@ -104,6 +116,20 @@ func (s *Service) Publish(ctx context.Context, runID, sessionID, artifactID, tit
 		return Published{}, err
 	}
 	return pub, nil
+}
+
+// List returns metadata (no content) for the session's published documents,
+// oldest first — what a rebuilt agent session needs to reshare a document whose
+// artifact_id died with a previous pod. Session-less (CLI) runs see only their
+// own run's documents.
+func (s *Service) List(ctx context.Context, sessionID, runID string) ([]store.Artifact, error) {
+	var out []store.Artifact
+	err := s.Store.Tx(ctx, func(tx store.Tx) error {
+		got, e := tx.ListArtifacts(sessionID, runID)
+		out = got
+		return e
+	})
+	return out, err
 }
 
 // Resolve returns the artifact behind a raw share token plus the link's expiry.
