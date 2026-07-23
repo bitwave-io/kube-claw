@@ -232,6 +232,15 @@ type Tx interface {
 	// ErrNotFound for unknown, ErrTokenExpired for expired OR revoked (no oracle
 	// distinguishing the two), plus the token's expiry for display.
 	ResolveArtifactToken(tokenHash string) (Artifact, string, error)
+	// ArtifactIDByTokenHash returns the artifact behind a share-token hash even
+	// when the token is expired or revoked — an old link is the one durable
+	// handle a rebuilt agent session still has, so reshare accepts it. Returns
+	// ErrNotFound for an unknown hash.
+	ArtifactIDByTokenHash(tokenHash string) (string, error)
+	// ListArtifacts returns metadata (Content left empty) for a session's
+	// published documents, oldest first. For session-less (CLI) runs pass
+	// sessionID=="" and scoping falls back to the single runID.
+	ListArtifacts(sessionID, runID string) ([]Artifact, error)
 	// RevokeArtifactTokens revokes all live tokens for an artifact (reshare).
 	RevokeArtifactTokens(artifactID string) error
 

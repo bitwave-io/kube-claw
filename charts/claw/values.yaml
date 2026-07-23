@@ -36,7 +36,9 @@ updates:
     -----BEGIN PUBLIC KEY-----
     MCowBQYDK2VwAyEAUryD7JLZcaR1yNfyJBF+6I4GstM56T9JB57/nXl6ZvU=
     -----END PUBLIC KEY-----
-  checkInterval: 6h
+  # How often the supervisor polls for new releases. An on-demand check is
+  # always available (DM the bot "check for updates" / claw upgrade check).
+  checkInterval: 1h
   # How long the supervisor waits for a new version to confirm startup before
   # rolling back (§24.5).
   confirmDeadline: 10m

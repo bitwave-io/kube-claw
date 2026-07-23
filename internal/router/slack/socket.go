@@ -103,13 +103,24 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 		if e.BotID != "" {
 			return // ignore bot messages (incl. our own)
 		}
-		// A DM to the bot is a command (e.g. "register secret ..."), not a run.
+		// A DM: the exact commands ("register secret …", "announce releases …")
+		// stay deterministic; everything else is a normal conversation — an
+		// agent run, just like being summoned to a thread.
 		if e.ChannelType == "im" {
-			reply := r.HandleDM(ctx, e.User, e.Text)
-			if reply != "" && r.Notifier != nil {
-				if perr := r.Notifier.PostReply(ctx, e.Channel, "", reply); perr != nil {
-					lg.Error(perr, "post DM reply")
+			if reply := r.HandleDM(ctx, e.User, e.Text); reply != "" {
+				if r.Notifier != nil {
+					if perr := r.Notifier.PostReply(ctx, e.Channel, "", reply); perr != nil {
+						lg.Error(perr, "post DM reply")
+					}
 				}
+				return
+			}
+			runID, err := r.HandleDMMessage(ctx, e.TimeStamp, e.Channel, r.agentText(e.User, e.Text), e.User)
+			if err != nil {
+				lg.Error(err, "handle DM message")
+			} else if runID != "" {
+				lg.Info("created run from DM", "run", runID)
+				r.react(ctx, e.Channel, e.TimeStamp)
 			}
 			return
 		}

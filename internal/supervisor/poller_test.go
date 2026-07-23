@@ -104,3 +104,57 @@ func TestPollerAutoApproves(t *testing.T) {
 		t.Fatal("requires-helm release must not be auto-approved")
 	}
 }
+
+// TestPollerOnDemandCheck: the check-requested annotation forces a poll even
+// inside the interval, and is consumed (cleared) so it fires exactly once.
+func TestPollerOnDemandCheck(t *testing.T) {
+	ctx := context.Background()
+	cp := testCP(clawv1alpha1.UpdateModePrompt)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(cp).
+		WithStatusSubresource(&clawv1alpha1.ControlPlane{}).Build()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	fetches := 0
+	p := &Poller{Client: c, Namespace: "claw-system",
+		Fetch: func(context.Context, string) (Manifest, error) { fetches++; return testManifest("v0.5.0"), nil },
+		Now:   func() time.Time { return now }}
+
+	p.pollAll(ctx) // initial: due (no lastCheckTime)
+	if fetches != 1 {
+		t.Fatalf("initial fetches = %d", fetches)
+	}
+	// Inside the interval: not due → no fetch.
+	p.pollAll(ctx)
+	if fetches != 1 {
+		t.Fatalf("interval not respected: fetches = %d", fetches)
+	}
+	// The controller requests an immediate check → next pass polls and
+	// consumes the annotation.
+	got := getCP(t, c)
+	got.Annotations = map[string]string{clawv1alpha1.AnnotationCheckRequested: "2026-07-16T12:00:30Z"}
+	if err := c.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	p.pollAll(ctx)
+	if fetches != 2 {
+		t.Fatalf("on-demand check did not poll: fetches = %d", fetches)
+	}
+	if got = getCP(t, c); got.Annotations[clawv1alpha1.AnnotationCheckRequested] != "" {
+		t.Fatal("check-requested annotation must be cleared after the poll")
+	}
+	// And it fired once: the next pass is quiet again.
+	p.pollAll(ctx)
+	if fetches != 2 {
+		t.Fatalf("cleared request re-polled: fetches = %d", fetches)
+	}
+
+	// Poke is safe with and without a kick channel.
+	p.Poke()
+	p.Kick = make(chan struct{}, 1)
+	p.Poke()
+	p.Poke() // coalesces, must not block
+	select {
+	case <-p.Kick:
+	default:
+		t.Fatal("kick channel empty after Poke")
+	}
+}

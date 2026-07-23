@@ -28,7 +28,7 @@ func TestNameResolution(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	n := &Notifier{api: slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL + "/"))}
+	n := &Notifier{api: slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL+"/"))}
 
 	if got := n.UserName(ctx, "U1"); got != "pat" {
 		t.Fatalf("UserName = %q", got)

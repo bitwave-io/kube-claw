@@ -44,11 +44,15 @@ func TestAdminClaimFirstWins(t *testing.T) {
 }
 
 // fakeUpgrades records upgrade decisions.
-type fakeUpgrades struct{ approved, skipped, deferred string }
+type fakeUpgrades struct {
+	approved, skipped, deferred string
+	checks                      int
+}
 
 func (f *fakeUpgrades) Approve(_ context.Context, v, _ string) error { f.approved = v; return nil }
 func (f *fakeUpgrades) Skip(_ context.Context, v, _ string) error    { f.skipped = v; return nil }
 func (f *fakeUpgrades) Later(_ context.Context, v string) error      { f.deferred = v; return nil }
+func (f *fakeUpgrades) CheckNow(_ context.Context) error             { f.checks++; return nil }
 
 // TestHandleUpgradeAction: only the configured admin's clicks are honored, and
 // each action dispatches to the UpgradeActor.

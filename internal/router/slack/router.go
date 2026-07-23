@@ -351,16 +351,33 @@ func (r *Router) handleAnnounceCommand(ctx context.Context, userID, text string)
 	return fmt.Sprintf("Got it — I'll announce new kube-claw releases and upgrade events in <#%s>. Make sure I'm a member of it (`/invite`), or the posts will fail.", m[1])
 }
 
-// HandleDM handles a direct message to the bot: secret registration
-// ("register secret <name> [description]" mints a one-time intake link with
-// the DMing user as granter) and management-channel setup ("announce releases
-// in #channel"). Returns the reply text.
+// HandleDM handles the DETERMINISTIC direct-message commands: secret
+// registration ("register secret <name> [description]" mints a one-time
+// intake link with the DMing user as granter) and management-channel setup
+// ("announce releases in #channel"). Returns the reply text — or "" when the
+// message is no command and an LLM is configured, signalling the caller to
+// treat the DM as a normal agent conversation (HandleDMMessage). The exact
+// commands stay string-matched on purpose: they must work identically on
+// LLM-less installs and never depend on a model's mood.
 func (r *Router) HandleDM(ctx context.Context, userID, text string) string {
 	low := strings.ToLower(text)
+	if strings.Contains(low, "check") &&
+		(strings.Contains(low, "update") || strings.Contains(low, "upgrade") || strings.Contains(low, "release")) {
+		if r.Upgrades == nil {
+			return "Self-update isn't enabled on this install."
+		}
+		if err := r.Upgrades.CheckNow(ctx); err != nil {
+			return "couldn't request the check: " + err.Error()
+		}
+		return "On it — checking for a new release now. If something new turns up, the upgrade admin gets a prompt (and the management channel an announcement) within a minute."
+	}
 	if strings.Contains(low, "announc") && strings.Contains(low, "release") {
 		return r.handleAnnounceCommand(ctx, userID, text)
 	}
 	if !strings.Contains(low, "register") || !strings.Contains(low, "secret") {
+		if r.Classifier != nil {
+			return "" // conversational install — the DM becomes an agent run
+		}
 		return "Hi! DM me `register secret <name> [description]` and I'll send a one-time link to add the value — you'll be set as its approver.\nYou can also DM `announce releases in #channel` to set a management channel for release announcements."
 	}
 	if r.Secrets == nil {
@@ -395,6 +412,42 @@ func parseRegisterSecret(text string) (name, description string) {
 		}
 	}
 	return "", ""
+}
+
+// HandleDMMessage turns a non-command DM into an agent run — a DM is by
+// definition addressed to the bot, so no route matching and no relevance
+// gates apply. The IM channel id is the session: the whole DM is one
+// continuous conversation, exactly like an owned thread.
+func (r *Router) HandleDMMessage(ctx context.Context, eventID, dmChannel, text, user string) (string, error) {
+	agentNs, agentName := r.agentsNS(), r.DefaultAgent
+	if pns, pn := r.pickAgent(ctx, text); pn != "" {
+		agentNs, agentName = pns, pn
+	}
+	if agentName == "" {
+		return "", nil // no agent to route to (no default configured)
+	}
+	runID := "run-" + randHex()
+	created := false
+	err := r.Store.Tx(ctx, func(tx store.Tx) error {
+		dup, err := tx.SeenEvent("slack", eventID)
+		if err != nil || dup {
+			return err
+		}
+		if err := tx.CreateRun(store.Run{
+			ID: runID, AgentNamespace: agentNs, AgentName: agentName,
+			SessionID: dmChannel, Phase: "Pending",
+			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q,"user":%q,"dm":true}`, dmChannel, eventID, user),
+			Input:  fmt.Sprintf(`{"text":%q}`, text),
+		}); err != nil {
+			return err
+		}
+		created = true
+		return tx.AppendAudit(store.AuditEvent{Type: "connector.event_received", RunID: runID, Actor: "slack"})
+	})
+	if err != nil || !created {
+		return "", err
+	}
+	return runID, nil
 }
 
 // HandleMessage dedupes a Slack event and, if it matches a route, creates a run.
@@ -538,6 +591,8 @@ type UpgradeActor interface {
 	Skip(ctx context.Context, version, byUser string) error
 	// Later defers the decision: the prompt re-arms on the next version check.
 	Later(ctx context.Context, version string) error
+	// CheckNow requests an immediate release check from the supervisor.
+	CheckNow(ctx context.Context) error
 }
 
 // UpgradeActionValue encodes an upgrade-prompt button: "upgrade|<action>|<version>".

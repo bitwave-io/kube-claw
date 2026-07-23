@@ -9,7 +9,8 @@
 #   - Public UI base URL         (used in secret-intake links)     [optional]
 #
 # Usage:
-#   ./scripts/install.sh                         # interactive, current kube context
+#   curl -fsSL https://kube-claw.com/install.sh | bash    # no clone needed
+#   ./scripts/install.sh                         # from a clone (uses the local chart)
 #   VERSION=0.5.0 ./scripts/install.sh           # pin a specific published release
 #   ./scripts/install.sh --set controller.replicas=2   # extra args pass through to helm
 #
@@ -28,20 +29,41 @@ AGENTS_NS="${AGENTS_NS:-claw-agents}"
 IMAGE_REPO="${IMAGE_REPO:-docker.io/bitwavecode/kube-claw-controller}"
 RUNNER_REPO="${RUNNER_REPO:-docker.io/bitwavecode/kube-claw-runner}"
 SUPERVISOR_REPO="${SUPERVISOR_REPO:-docker.io/bitwavecode/kube-claw-supervisor}"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# The pinned release version (immutable tag — NOT latest; self-update needs a
-# semver-comparable identity). Defaults to the chart's appVersion.
-VERSION="${VERSION:-${IMAGE_TAG:-}}"
-if [[ -z "$VERSION" ]]; then
-  VERSION="$(sed -n 's/^appVersion: "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ROOT/charts/claw/Chart.yaml")"
-fi
-
 # --- preflight ---------------------------------------------------------------
 for bin in kubectl helm; do
   command -v "$bin" >/dev/null 2>&1 || { echo "error: '$bin' not found on PATH" >&2; exit 1; }
 done
 if ! kubectl cluster-info >/dev/null 2>&1; then
   echo "error: kubectl can't reach a cluster. Point your kubeconfig at the target cluster first." >&2
+  exit 1
+fi
+
+# --- chart source ------------------------------------------------------------
+# Running from a repo clone → the local chart (contributors, pinned checkouts).
+# Running via curl | bash → the published OCI chart; no clone required.
+OCI_CHART="${OCI_CHART:-oci://registry-1.docker.io/bitwavecode/claw}"
+ROOT="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo /nonexistent)"
+if [[ -f "$ROOT/charts/claw/Chart.yaml" ]]; then
+  CHART="$ROOT/charts/claw"
+  CRD_DIR="$ROOT/charts/claw/crds"
+else
+  CHART="$OCI_CHART"
+  CRD_DIR=""
+fi
+
+# The pinned release version (immutable tag — NOT latest; self-update needs a
+# semver-comparable identity). Defaults to the chart's appVersion (local clone)
+# or the latest published release (OCI).
+VERSION="${VERSION:-${IMAGE_TAG:-}}"
+if [[ -z "$VERSION" ]]; then
+  if [[ -n "$CRD_DIR" ]]; then
+    VERSION="$(sed -n 's/^appVersion: "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$CHART/Chart.yaml")"
+  else
+    VERSION="$(helm show chart "$OCI_CHART" 2>/dev/null | sed -n 's/^appVersion: "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p')"
+  fi
+fi
+if [[ -z "$VERSION" ]]; then
+  echo "error: could not resolve a release version (set VERSION=x.y.z explicitly)" >&2
   exit 1
 fi
 
@@ -57,7 +79,15 @@ read -rp "Proceed? [y/N] " go
 
 # Apply CRDs with kubectl, not Helm: Helm only installs crds/ on first install and
 # never upgrades them, so kubectl apply is the robust path for install AND upgrade.
-kubectl apply -f "$ROOT/charts/claw/crds/"
+# From the OCI chart, pull the tgz and apply the crds/ it carries.
+if [[ -n "$CRD_DIR" ]]; then
+  kubectl apply -f "$CRD_DIR/"
+else
+  pulldir="$(mktemp -d)"
+  trap 'rm -rf "$pulldir"' EXIT
+  helm pull "$OCI_CHART" --version "$VERSION" --destination "$pulldir" --untar >/dev/null
+  kubectl apply -f "$pulldir/claw/crds/"
+fi
 kubectl get ns "$NS"        >/dev/null 2>&1 || kubectl create ns "$NS"
 kubectl get ns "$AGENTS_NS" >/dev/null 2>&1 || kubectl create ns "$AGENTS_NS"
 
@@ -137,7 +167,9 @@ case "$UPDATES_MODE" in
 esac
 
 # --- install -----------------------------------------------------------------
-helm upgrade --install claw "$ROOT/charts/claw" -n "$NS" \
+chart_args=("$CHART")
+[[ "$CHART" == oci://* ]] && chart_args+=(--version "$VERSION")
+helm upgrade --install claw "${chart_args[@]}" -n "$NS" \
   --set image.repository="$IMAGE_REPO" \
   --set image.runnerRepository="$RUNNER_REPO" \
   --set supervisor.repository="$SUPERVISOR_REPO" \

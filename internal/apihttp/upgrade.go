@@ -14,6 +14,8 @@ import (
 type UpgradeAPI interface {
 	Approve(ctx context.Context, version, byUser string) error
 	Status(ctx context.Context) (map[string]any, error)
+	// CheckNow requests an immediate release check from the supervisor.
+	CheckNow(ctx context.Context) error
 }
 
 // upgradeStatus reports the self-update state (GET /v1/upgrade/status).
@@ -28,6 +30,26 @@ func (s *Server) upgradeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// upgradeCheck requests an immediate release check (POST /v1/upgrade/check,
+// admin-gated like the other upgrade writes). The check is asynchronous — the
+// supervisor polls within seconds; results land on the ControlPlane status and
+// flow to Slack as usual.
+func (s *Server) upgradeCheck(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(r) {
+		writeErr(w, http.StatusUnauthorized, "admin credentials required")
+		return
+	}
+	if s.Upgrades == nil {
+		writeErr(w, http.StatusNotFound, "self-update isn't configured on this controller")
+		return
+	}
+	if err := s.Upgrades.CheckNow(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "check requested"})
 }
 
 // upgradeApprove is the break-glass approval (POST /v1/upgrade/approve,

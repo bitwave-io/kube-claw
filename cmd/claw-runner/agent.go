@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -292,7 +293,7 @@ func newAgentSession(systemPrompt string) *agentSession {
 		"Bash commands are killed after 90 seconds and long output is truncated — use non-interactive flags, and narrow output with grep/head/--format instead of dumping everything.",
 		"Before each slow or significant command, say in one short sentence what you're about to do. That narration is shown to the user as live progress while they wait.",
 		"You are chatting in Slack. Format replies as Slack mrkdwn: *single asterisks* for bold, _underscores_ for italic, `backticks` for code, ``` fenced blocks ``` for command output, and simple - bullets. NEVER use Markdown headers (#), **double asterisks**, or tables — they render as literal characters in Slack. Messages may arrive prefixed with the sender's Slack id (`<@U…>:`), and you can mention a user the same way.",
-		"You are ONE PARTICIPANT in a team conversation, not its owner. The humans in the thread also talk to EACH OTHER: if the latest message is addressed to another person, is two people coordinating between themselves, or otherwise needs nothing from you, reply with exactly "+noReply+" (nothing else) and no message will be posted.",
+		"You are ONE PARTICIPANT in a team conversation, not its owner. The humans in the thread also talk to EACH OTHER: if the latest message is addressed to another person, is two people coordinating between themselves, or otherwise needs nothing from you, reply with exactly "+noReply+" (nothing else — no formatting, no token-usage line) and no message will be posted.",
 		"SCOPE: do exactly what you were asked, then stop. An idea someone floats in passing (\"this could also help us consolidate X\") is context, NOT a task — do not start on it, do not draft a plan for it, and do not request credentials for it. If you think you could help with something nobody assigned you, offer it in ONE short sentence at most, and drop it unless someone explicitly says yes.",
 		"Never begin multi-step work (inventories, audits, designs, migrations) on your own initiative. Say what you would do in a sentence or two and wait for an explicit go-ahead before doing any of it.",
 		"Answer the specific question that was asked, concisely. Do not append capability menus, offers of other things you could look into, or plans for work beyond the question.",
@@ -301,7 +302,8 @@ func newAgentSession(systemPrompt string) *agentSession {
 		"If a task you were asked to do needs a credential you don't have (a cloud key, an API token), DON'T give up — call the `request_secret` tool. It DMs the user a secure link to provide it, then writes it to a file in this container so you can use it.",
 		"CREDENTIAL REQUESTS INTERRUPT HUMANS: request_secret DMs a user or pings the secret's approvers. Only call it when the credential is required for a task someone explicitly asked YOU to do — never speculatively, never \"in parallel\" for a side idea, and never just because a credential is listed as available.",
 		"IMPORTANT: if you already requested a secret and the user now says they've added it / asks you to check, call `request_secret` AGAIN with the same name — that installs the value. Do NOT use bash to look for it; the value is only pulled into the container by request_secret.",
-		"When the user wants a document they can take OUT of Slack — a design doc to hand to a coding agent, a runbook, a spec — write it as full Markdown (headers/tables are fine there; the Slack-formatting rule applies only to chat replies) and call `publish_document`. It returns a time-bound share link. In your reply, always give the link, state plainly when it expires (the tool tells you), and mention that saying \"reshare\" here gets a fresh link. If the user asks to reshare/regenerate a link, call `publish_document` again with that document's `artifact_id` — do NOT resend the content.",
+		"You CAN run recurring work, even though this container is ephemeral: kube-claw has a scheduler that re-invokes you at a cron time. When a user asks for something \"every day / weekly / on a schedule,\" call `create_schedule` — do NOT say you're unable to run scheduled work. The schedule you create is DISABLED until a human approves it (they get a DM + a dashboard link), so tell the user it needs their approval before it starts. Each scheduled run is a FRESH invocation with no memory of this thread, so write the schedule's `prompt` self-contained. Use `list_schedules` to see or check on your schedules. (You can propose and inspect schedules, but you cannot enable or delete them — that's a human/admin action.)",
+		"When the user wants a document they can take OUT of Slack — a design doc to hand to a coding agent, a runbook, a spec — write it as full Markdown (headers/tables are fine there; the Slack-formatting rule applies only to chat replies) and call `publish_document`. It returns a time-bound share link. In your reply, always give the link, state plainly when it expires (the tool tells you), and mention that saying \"reshare\" here gets a fresh link. If the user asks to reshare a link, call `publish_document` again with that document's `artifact_id` — or, if you don't have the id (published before your pod started), pass the OLD share link from the thread as `share_url` (works even expired), or call `list_documents` to find the id by title. Published documents are stored durably and are ALWAYS recoverable one of these ways — never regenerate a published document from scratch, and never resend its content on a reshare.",
 		"Prefer read-only commands. This is a chat thread — you may be asked follow-up questions.")
 	sys = sys + "\n\n" + strings.Join(notes, "\n")
 
@@ -346,14 +348,17 @@ func newAgentSession(systemPrompt string) *agentSession {
 		Description: anthropic.String("Publish a Markdown document (a design doc, spec, runbook) and get back a TIME-BOUND " +
 			"share link the user can hand to tools outside Slack (the URL serves the raw markdown). The result tells you the " +
 			"exact expiry — always repeat the link AND its expiry in your reply, and note that the user can say \"reshare\" " +
-			"in this thread for a fresh link. To reshare an expired/old link, call this again with the returned artifact_id " +
-			"and NO markdown — the stored document is relinked as-is (documents are immutable; to change content, publish a " +
-			"new document instead)."),
+			"in this thread for a fresh link. To reshare an expired/old link, call this again with NO markdown and either the " +
+			"returned artifact_id or (when you don't have the id) the OLD share link as share_url — the stored document is " +
+			"relinked as-is (documents are immutable; to change content, publish a new document instead). Published documents " +
+			"are stored durably: use list_documents to find one, never regenerate it."),
 		InputSchema: anthropic.ToolInputSchemaParam{
 			Properties: map[string]any{
 				"title":       map[string]any{"type": "string", "description": "short document title, e.g. \"Billing-alerts design\""},
-				"markdown":    map[string]any{"type": "string", "description": "the full document as Markdown (omit when resharing via artifact_id)"},
+				"markdown":    map[string]any{"type": "string", "description": "the full document as Markdown (omit when resharing)"},
 				"artifact_id": map[string]any{"type": "string", "description": "OPTIONAL: id of a previously published document to mint a fresh link for (revokes its old links)"},
+				"share_url": map[string]any{"type": "string", "description": "OPTIONAL: a previous share link for the document (even expired) — " +
+					"reshare handle for when you don't have the artifact_id, e.g. a link quoted earlier in this thread"},
 			},
 			Required: []string{"title"},
 		},
@@ -371,11 +376,68 @@ func newAgentSession(systemPrompt string) *agentSession {
 			},
 		},
 	}
+	listDocsTool := anthropic.ToolParam{
+		Name: "list_documents",
+		Description: anthropic.String("List the documents published in THIS conversation (artifact_id, title, published date). " +
+			"Documents are stored durably — even ones published before your pod started. Use this to find the artifact_id for a " +
+			"publish_document reshare instead of regenerating a document you can't see."),
+		InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}},
+	}
+	registerSecretTool := anthropic.ToolParam{
+		Name: "register_secret",
+		Description: anthropic.String("Create a NEW named secret in kube-claw and get a ONE-TIME intake link where the user " +
+			"pastes the value themselves — you and the chat never see it. The user you're talking to becomes the secret's " +
+			"approver. Use when someone wants to hand kube-claw a credential to keep (API tokens, deploy keys). Reply with the " +
+			"link and note it is one-time. (Distinct from request_secret, which asks to USE an existing secret in this run.)"),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"name":        map[string]any{"type": "string", "description": "secret name, e.g. gcp-billing-readonly (lowercase, dashes)"},
+				"description": map[string]any{"type": "string", "description": "what the secret is and what it will be used for"},
+			},
+			Required: []string{"name"},
+		},
+	}
+	announceChanTool := anthropic.ToolParam{
+		Name: "set_release_announce_channel",
+		Description: anthropic.String("Set (or clear) the management channel where kube-claw announces new releases and upgrade " +
+			"events (available/applied/rolled back). Pass the Slack channel ID: when the user names a channel like #ops, the " +
+			"message text carries it encoded as <#C0123ABCD|ops> — use the C… id inside. Pass an empty channel to stop " +
+			"announcements. Only the upgrade admin may change this; remind the user the bot must be invited to the channel."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"channel": map[string]any{"type": "string", "description": "Slack channel id (C…), or \"\" to stop announcing"},
+			},
+			Required: []string{"channel"},
+		},
+	}
+	createScheduleTool := anthropic.ToolParam{
+		Name: "create_schedule",
+		Description: anthropic.String("PROPOSE a recurring run of yourself: at each cron occurrence you are re-invoked " +
+			"with `prompt` as the message and your answer is posted to the current channel. Use this when a user asks you to " +
+			"do something \"every day / weekly / on a schedule.\" The schedule is created DISABLED and the user is DM'd an " +
+			"approval link — nothing runs until a human enables it in the dashboard. Tell the user it needs their approval to " +
+			"start. `cron` is standard 5-field UTC (minute hour day month weekday), e.g. '0 13 * * *' = 13:00 UTC daily " +
+			"(convert the user's local time to UTC yourself and state the UTC time back to them)."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"cron":   map[string]any{"type": "string", "description": "standard 5-field cron in UTC, e.g. '0 13 * * *'"},
+				"prompt": map[string]any{"type": "string", "description": "the instruction to run at each occurrence — write it self-contained, as if sent fresh (it won't have this conversation's context)"},
+			},
+			Required: []string{"cron", "prompt"},
+		},
+	}
+	listSchedulesTool := anthropic.ToolParam{
+		Name:        "list_schedules",
+		Description: anthropic.String("List your own recurring schedules (cron, prompt, channel, and whether each is enabled or still awaiting approval). Read-only. Use it to answer \"what do I have scheduled?\" or to check whether a schedule you proposed has been approved."),
+		InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}},
+	}
 	return &agentSession{
-		client:        anthropic.NewClient(), // reads ANTHROPIC_API_KEY
-		model:         model,
-		sys:           sys,
-		tools:         []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool}, {OfTool: &switchModelTool}},
+		client: anthropic.NewClient(), // reads ANTHROPIC_API_KEY
+		model:  model,
+		sys:    sys,
+		tools: []anthropic.ToolUnionParam{{OfTool: &bashTool}, {OfTool: &reqSecretTool}, {OfTool: &publishDocTool},
+			{OfTool: &listDocsTool}, {OfTool: &registerSecretTool}, {OfTool: &announceChanTool},
+			{OfTool: &createScheduleTool}, {OfTool: &listSchedulesTool}, {OfTool: &switchModelTool}},
 		controllerURL: os.Getenv("CLAW_CONTROLLER_URL"),
 		runID:         os.Getenv("CLAW_RUN_ID"),
 		agentName:     os.Getenv("CLAW_AGENT_NAME"),
@@ -440,7 +502,11 @@ func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
 	// answered turn's user message — mirroring how the live turn saw them.
 	var pending []string
 	for _, t := range out.Turns {
-		if t.Output == "" {
+		// Stored outputs carry the Slack usage footer; strip it so the replayed
+		// conversation matches what a warm pod's history looks like — and so the
+		// model doesn't learn to append footers (or worse, one to its NO_REPLY).
+		ans := stripUsageFooter(t.Output)
+		if ans == "" {
 			pending = append(pending, t.Input)
 			continue
 		}
@@ -451,7 +517,7 @@ func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
 		}
 		s.messages = append(s.messages,
 			anthropic.NewUserMessage(anthropic.NewTextBlock(in)),
-			anthropic.NewAssistantMessage(anthropic.NewTextBlock(t.Output)))
+			anthropic.NewAssistantMessage(anthropic.NewTextBlock(ans)))
 	}
 	// Trailing unanswered messages have no answered turn to ride with; a
 	// synthetic ack keeps the alternation valid without inventing an answer.
@@ -564,10 +630,40 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 						Title      string `json:"title"`
 						Markdown   string `json:"markdown"`
 						ArtifactID string `json:"artifact_id"`
+						ShareURL   string `json:"share_url"`
 					}
 					_ = json.Unmarshal(raw, &in)
 					s.setStep("Publishing document \"" + in.Title + "\"…")
-					result = s.publishDocument(tctx, in.Title, in.Markdown, in.ArtifactID)
+					result = s.publishDocument(tctx, in.Title, in.Markdown, in.ArtifactID, in.ShareURL)
+				case "list_documents":
+					s.setStep("Listing published documents…")
+					result = s.listDocuments(tctx)
+				case "register_secret":
+					var in struct {
+						Name        string `json:"name"`
+						Description string `json:"description"`
+					}
+					_ = json.Unmarshal(raw, &in)
+					s.setStep("Creating secret " + in.Name + "…")
+					result = s.registerSecret(tctx, in.Name, in.Description)
+				case "set_release_announce_channel":
+					var in struct {
+						Channel string `json:"channel"`
+					}
+					_ = json.Unmarshal(raw, &in)
+					s.setStep("Updating the release announcement channel…")
+					result = s.setAnnounceChannel(tctx, in.Channel)
+				case "create_schedule":
+					var in struct {
+						Cron   string `json:"cron"`
+						Prompt string `json:"prompt"`
+					}
+					_ = json.Unmarshal(raw, &in)
+					s.setStep("Proposing a schedule (" + in.Cron + " UTC)…")
+					result = s.createSchedule(tctx, in.Cron, in.Prompt)
+				case "list_schedules":
+					s.setStep("Listing schedules…")
+					result = s.listSchedules(tctx)
 				default: // bash
 					var in struct {
 						Command string `json:"command"`
@@ -645,8 +741,11 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 		return "", fmt.Errorf("agent produced no text answer")
 	}
 	// The agent judged the message wasn't for it — suppress the reply entirely
-	// (the sentinel is the whole answer; ignore any narration before it).
-	if strings.TrimSpace(final[len(final)-1]) == noReply {
+	// (the sentinel is the whole answer; ignore any narration before it). The
+	// model sometimes decorates the sentinel — a mimicked usage footer (learned
+	// from replayed history), italics — so compare after stripping those, or the
+	// literal sentinel ends up posted to the thread.
+	if strings.Trim(strings.TrimSpace(stripUsageFooter(final[len(final)-1])), "*_` ") == noReply {
 		return noReply, nil
 	}
 	// Tag every reply with the turn's token usage. The pod's first reply also
@@ -800,6 +899,30 @@ func (s *agentSession) streamModel(ctx context.Context, params anthropic.Message
 }
 
 // fmtTokens renders a token count compactly for the reply footer (837, 45.2k, 1.3M).
+// usageFooterLine matches one usage-footer line — the `_tokens: 15.9k in · 8
+// out_` / `_agent: general · model: … · tokens: …_` tail that turn() appends to
+// every posted reply, with the markup optional so it also catches a model
+// MIMICKING the footer after seeing it in replayed history.
+var usageFooterLine = regexp.MustCompile(`^_?(agent: [^·\n]+ · )?(model: [^·\n]+ · )?tokens: [\d.,]+[kM]? in · [\d.,]+[kM]? out_?$`)
+
+// stripUsageFooter removes trailing usage-footer lines from an answer. Used on
+// replayed history (the footer is Slack presentation, not conversation — left
+// in, the model learns to imitate it) and on the noReply sentinel check (a
+// mimicked footer must not turn a NO_REPLY into a posted message).
+func stripUsageFooter(s string) string {
+	for {
+		s = strings.TrimRight(s, " \t\n")
+		i := strings.LastIndex(s, "\n")
+		if !usageFooterLine.MatchString(strings.TrimSpace(s[i+1:])) {
+			return s
+		}
+		if i < 0 {
+			return ""
+		}
+		s = s[:i]
+	}
+}
+
 func fmtTokens(n int64) string {
 	switch {
 	case n >= 1_000_000:
@@ -924,11 +1047,40 @@ func (s *agentSession) requestSecret(ctx context.Context, name, description, rea
 	// Otherwise ask the controller: it provisions (DMs a link) or opens an access
 	// request to the secret's approvers, depending on whether it exists/is granted.
 	body, _ := json.Marshal(map[string]string{"name": name, "description": description, "reason": reason})
-	if err := s.post(ctx, fmt.Sprintf("/v1/runs/%s/request-secret", s.currentRunID()), body); err != nil {
+	resp, err := authedDo(ctx, http.MethodPost, fmt.Sprintf("%s/v1/runs/%s/request-secret", s.controllerURL, s.currentRunID()), body)
+	if err != nil {
 		return "Couldn't request the secret: " + err.Error()
 	}
+	// The controller reports who it actually DM'd ("notified") so the wait and
+	// the timeout message below can say so — "waiting" with no visible ping
+	// reads as a hang, and once meant the request had died silently.
+	var out struct {
+		Status   string   `json:"status"`
+		Notified []string `json:"notified"`
+		Granters []string `json:"granters"`
+		Pending  bool     `json:"pending"`
+	}
+	if resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return fmt.Sprintf("Couldn't request the secret: controller returned %s", resp.Status)
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+
+	pinged := mentions(out.Notified)
+	switch {
+	case out.Status == "granted":
+		s.setStep("Access to *" + name + "* is granted — fetching the value…")
+	case out.Status == "provisioning" && len(out.Notified) > 0:
+		s.setStep("Sent " + pinged + " a one-time link to provide *" + name + "* — waiting for the value…")
+	case len(out.Notified) > 0:
+		s.setStep("Asked " + pinged + " to approve access to *" + name + "* — waiting…")
+	case out.Pending:
+		s.setStep("An earlier access request for *" + name + "* is still pending with " + mentions(out.Granters) + " — waiting…")
+	default:
+		s.setStep("Waiting for access to *" + name + "*… (:warning: no Slack ping was sent)")
+	}
 	// Poll briefly in case it's approved/provided right away.
-	s.setStep("Waiting for access to *" + name + "* to be approved or provided…")
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
 		if path, content, ok := s.fetchRequested(ctx, name); ok {
@@ -945,7 +1097,35 @@ func (s *agentSession) requestSecret(ctx context.Context, name, description, rea
 		case <-time.After(5 * time.Second):
 		}
 	}
-	return fmt.Sprintf("Access to *%s* isn't granted yet — either an approver needs to approve the request, or the user needs to provide the value via the DM link. Once they have, call request_secret again with name=%q to install it (do NOT bash-check — only this tool installs the value).", name, name)
+	// Timed out: say what actually happened — who was pinged, or that nobody
+	// was — so the model relays the truth instead of implying a DM went out.
+	retry := fmt.Sprintf(" Once they have, call request_secret again with name=%q to install it (do NOT bash-check — only this tool installs the value).", name)
+	switch {
+	case out.Status == "provisioning" && len(out.Notified) > 0:
+		return fmt.Sprintf("No value for *%s* yet — %s was DM'd a one-time intake link and hasn't used it. Tell the user who was pinged.%s", name, pinged, retry)
+	case out.Status == "provisioning":
+		return fmt.Sprintf("*%s* still has no value, and NOBODY was notified (Slack DM failed or Slack is off — see controller logs). The user must add the value another way (dashboard/operator); tell them no ping went out.%s", name, retry)
+	case out.Status == "access_requested" && out.Pending:
+		return fmt.Sprintf("Access to *%s* isn't granted yet — an EARLIER request is still pending with granter(s) %s, so no new ping was sent. Suggest the user nudge them.%s", name, mentions(out.Granters), retry)
+	case out.Status == "access_requested" && len(out.Notified) > 0:
+		return fmt.Sprintf("Access to *%s* isn't granted yet — %s got an Approve/Deny request and hasn't acted on it.%s", name, pinged, retry)
+	case out.Status == "access_requested":
+		return fmt.Sprintf("Access to *%s* isn't granted yet, and notifying its granter(s) %s FAILED (see controller logs) — they do NOT know about the request; tell the user.%s", name, mentions(out.Granters), retry)
+	}
+	return fmt.Sprintf("Access to *%s* isn't granted yet — either an approver needs to approve the request, or the user needs to provide the value.%s", name, retry)
+}
+
+// mentions renders Slack ids as @-mentions ("<@U1>, <@U2>"); "someone" when
+// empty (defensive: an older controller that doesn't report who it pinged).
+func mentions(ids []string) string {
+	if len(ids) == 0 {
+		return "someone"
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = "<@" + id + ">"
+	}
+	return strings.Join(out, ", ")
 }
 
 // install writes a fetched secret into the pod and wires it up for the request's
@@ -977,13 +1157,14 @@ func (s *agentSession) install(ctx context.Context, name, path string, content [
 
 // publishDocument stores a markdown document via the controller and returns a
 // tool-result string carrying the share URL and its exact expiry, so the agent
-// can (and is instructed to) relay both to the user. An artifactID reshares an
-// already-published document under a fresh link, revoking the old ones.
-func (s *agentSession) publishDocument(ctx context.Context, title, markdown, artifactID string) string {
+// can (and is instructed to) relay both to the user. An artifactID or shareURL
+// (a previous link, even expired) reshares an already-published document under
+// a fresh link, revoking the old ones.
+func (s *agentSession) publishDocument(ctx context.Context, title, markdown, artifactID, shareURL string) string {
 	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
 		return "publish_document is unavailable in this run (no controller binding)."
 	}
-	body, _ := json.Marshal(map[string]string{"title": title, "content": markdown, "artifactId": artifactID})
+	body, _ := json.Marshal(map[string]string{"title": title, "content": markdown, "artifactId": artifactID, "shareUrl": shareURL})
 	url := fmt.Sprintf("%s/v1/runs/%s/artifacts", s.controllerURL, s.currentRunID())
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -992,8 +1173,10 @@ func (s *agentSession) publishDocument(ctx context.Context, title, markdown, art
 		return "Couldn't publish the document: " + err.Error()
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound && artifactID != "" {
-		return fmt.Sprintf("No document with artifact_id %q exists in this conversation — publish it again with the full markdown instead.", artifactID)
+	if resp.StatusCode == http.StatusNotFound && (artifactID != "" || shareURL != "") {
+		return "That artifact_id/share link doesn't match any document published in this conversation. " +
+			"Call list_documents to see this conversation's published documents and reshare with the right artifact_id. " +
+			"Do NOT regenerate the document — if list_documents doesn't show it either, tell the user plainly that you can't locate it and ask how to proceed."
 	}
 	if resp.StatusCode >= 300 {
 		return "Couldn't publish the document: controller returned " + resp.Status
@@ -1011,16 +1194,173 @@ func (s *agentSession) publishDocument(ctx context.Context, title, markdown, art
 		title, out.URL, expiry, out.ArtifactID)
 }
 
-func (s *agentSession) post(ctx context.Context, path string, body []byte) error {
-	resp, err := authedDo(ctx, http.MethodPost, s.controllerURL+path, body)
+// listDocuments returns the conversation's published documents (id + title +
+// date, never content) as a tool-result string — the recovery path for
+// resharing a document whose artifact_id died with a previous pod.
+func (s *agentSession) listDocuments(ctx context.Context) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "list_documents is unavailable in this run (no controller binding)."
+	}
+	url := fmt.Sprintf("%s/v1/runs/%s/artifacts", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return "Couldn't list documents: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "Couldn't list documents: controller returned " + resp.Status
+	}
+	var out struct {
+		Documents []struct{ ArtifactID, Title, CreatedAt string }
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return "Couldn't list documents: unexpected controller response."
+	}
+	if len(out.Documents) == 0 {
+		return "No documents have been published in this conversation."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d document(s) published in this conversation (reshare any of them by calling publish_document with its artifact_id):\n", len(out.Documents))
+	for _, d := range out.Documents {
+		fmt.Fprintf(&b, "- %s — %q (published %s)\n", d.ArtifactID, d.Title, d.CreatedAt)
+	}
+	return b.String()
+}
+
+// registerSecret creates a named secret with the conversation's user as
+// granter and returns the one-time intake link (register_secret tool).
+func (s *agentSession) registerSecret(ctx context.Context, name, description string) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "register_secret is unavailable in this run (no controller binding)."
+	}
+	body, _ := json.Marshal(map[string]string{"name": name, "description": description})
+	url := fmt.Sprintf("%s/v1/runs/%s/register-secret", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodPost, url, body)
+	if err != nil {
+		return "Couldn't register the secret: " + err.Error()
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("controller returned %s", resp.Status)
+		return "Couldn't register the secret: " + readAPIError(resp)
 	}
-	return nil
+	var out struct{ Name, Granter, URL string }
+	if json.NewDecoder(resp.Body).Decode(&out) != nil || out.URL == "" {
+		return "Couldn't register the secret: unexpected controller response."
+	}
+	return fmt.Sprintf("Secret %q created — <@%s> is its approver.\nOne-time intake link (open it and paste the value; the link dies after one use):\n%s",
+		out.Name, out.Granter, out.URL)
+}
+
+// setAnnounceChannel points release/upgrade announcements at a channel
+// (set_release_announce_channel tool). "" clears it.
+func (s *agentSession) setAnnounceChannel(ctx context.Context, channel string) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "set_release_announce_channel is unavailable in this run (no controller binding)."
+	}
+	body, _ := json.Marshal(map[string]string{"channel": channel})
+	url := fmt.Sprintf("%s/v1/runs/%s/announce-channel", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodPost, url, body)
+	if err != nil {
+		return "Couldn't update the announcement channel: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "Couldn't update the announcement channel: " + readAPIError(resp)
+	}
+	if channel == "" {
+		return "Release announcements to a channel are now OFF (upgrade prompts still go to the upgrade admin)."
+	}
+	return fmt.Sprintf("Done — new kube-claw releases and upgrade events will be announced in <#%s>. Remind the user the bot must be a member of that channel (/invite) or the posts will fail.", channel)
+}
+
+// createSchedule proposes a recurring invocation of this agent (create_schedule
+// tool). The controller creates it DISABLED and DMs the run's user an approval
+// link; nothing fires until a human enables it. The agent supplies only cron +
+// prompt — the controller fixes the agent/namespace/channel from the run.
+func (s *agentSession) createSchedule(ctx context.Context, cronExpr, prompt string) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "create_schedule is unavailable in this run (no controller binding)."
+	}
+	body, _ := json.Marshal(map[string]string{"cron": cronExpr, "prompt": prompt})
+	url := fmt.Sprintf("%s/v1/runs/%s/request-schedule", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodPost, url, body)
+	if err != nil {
+		return "Couldn't create the schedule: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "Couldn't create the schedule: " + readAPIError(resp)
+	}
+	var out struct {
+		ID       string `json:"id"`
+		Notified bool   `json:"notified"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out.Notified {
+		return fmt.Sprintf("Proposed a schedule (`%s` UTC) — it's created but OFF until approved. I've DM'd the user an approval link; it won't run until they enable it in the dashboard. Tell them to expect that DM.", cronExpr)
+	}
+	return fmt.Sprintf("Proposed a schedule (`%s` UTC) — it's created but OFF until approved. NOBODY was DM'd (Slack is off or the send failed), so tell the user to enable it themselves in the dashboard at /ui/schedules. It will NOT run until enabled.", cronExpr)
+}
+
+// listSchedules returns this agent's schedules (list_schedules tool), read-only.
+func (s *agentSession) listSchedules(ctx context.Context) string {
+	if s.controllerURL == "" || s.currentRunID() == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return "list_schedules is unavailable in this run (no controller binding)."
+	}
+	url := fmt.Sprintf("%s/v1/runs/%s/schedules", s.controllerURL, s.currentRunID())
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := authedDo(rctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "Couldn't list schedules: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "Couldn't list schedules: " + readAPIError(resp)
+	}
+	var scheds []struct {
+		Cron, Prompt, NextRunAt string
+		Enabled                 bool
+	}
+	if json.NewDecoder(resp.Body).Decode(&scheds) != nil {
+		return "Couldn't list schedules: unexpected controller response."
+	}
+	if len(scheds) == 0 {
+		return "You have no schedules."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "You have %d schedule(s):\n", len(scheds))
+	for _, sc := range scheds {
+		state := "awaiting approval (OFF)"
+		if sc.Enabled {
+			state = "enabled"
+		}
+		next := sc.NextRunAt
+		if next == "" {
+			next = "—"
+		}
+		fmt.Fprintf(&b, "- `%s` UTC [%s], next: %s — %s\n", sc.Cron, state, next, sc.Prompt)
+	}
+	return b.String()
+}
+
+// readAPIError extracts the controller's error message for a tool result.
+func readAPIError(resp *http.Response) string {
+	var out struct {
+		Error string `json:"error"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&out) == nil && out.Error != "" {
+		return out.Error
+	}
+	return "controller returned " + resp.Status
 }
 
 // fetchRequested returns (path, decoded value, true) once the secret is provided.

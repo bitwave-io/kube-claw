@@ -242,7 +242,7 @@ spec:
                     description: Channel is the release stream to follow.
                     type: string
                   checkInterval:
-                    default: 6h
+                    default: 1h
                     description: CheckInterval is how often the supervisor polls the
                       release manifest.
                     type: string

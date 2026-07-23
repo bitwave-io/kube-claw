@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kube-claw — your team's AI agents. Sandboxed. Audited. In your cluster.</title>
+<meta name="description" content="A Kubernetes operator that runs sandboxed, Slack-triggered AI agents — with a real secret authority, human-approved credential access, and a self-updating control plane.">
+<link rel="icon" type="image/png" href="kube-claw.png">
+<style>
+:root{
+  --bg:#0b0e14;--panel:#111622;--panel2:#0e1320;--line:#1e2636;
+  --ink:#e6e9f0;--mut:#8b94a7;--accent:#4a90ff;--accent2:#7fb0ff;
+  --good:#3fdc97;--code:#0a0d13;--radius:12px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+a{color:var(--accent2);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+code{background:#171d2b;padding:.12rem .4rem;border-radius:5px;font-size:.88em}
+.wrap{max-width:1060px;margin:0 auto;padding:0 1.25rem}
+nav{position:sticky;top:0;z-index:10;background:rgba(11,14,20,.86);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;gap:1.4rem;height:60px}
+nav .brand{font-weight:800;font-size:1.05rem;color:var(--ink)}
+nav .brand{display:inline-flex;align-items:center}nav .brand img{height:1.5rem;width:auto;margin-right:.4rem}
+nav a.nl{color:var(--mut);font-size:.92rem}
+nav a.nl:hover{color:var(--ink);text-decoration:none}
+nav .gh{margin-left:auto;border:1px solid var(--line);border-radius:8px;padding:.4rem .8rem;color:var(--ink);font-size:.9rem;background:var(--panel)}
+nav .gh:hover{border-color:var(--accent);text-decoration:none}
+header{padding:5.5rem 0 4rem;text-align:center;background:
+  radial-gradient(600px 300px at 50% -40px,rgba(74,144,255,.15),transparent 70%)}
+header .crab{display:block;width:230px;height:auto;margin:0 auto .6rem}
+h1{font-size:clamp(2.3rem,6vw,3.4rem);font-weight:850;letter-spacing:-.02em}
+.tag{font-size:clamp(1.05rem,2.6vw,1.35rem);color:var(--ink);margin:.9rem 0 .4rem;font-weight:600}
+.tag em{font-style:normal;color:var(--accent)}
+.sub{color:var(--mut);max-width:680px;margin:0 auto 2rem}
+.cta{display:inline-flex;gap:.8rem;flex-wrap:wrap;justify-content:center}
+.btn{display:inline-block;padding:.65rem 1.25rem;border-radius:9px;font-weight:650;font-size:.95rem}
+.btn.p{background:var(--accent);color:#fff}
+.btn.p:hover{filter:brightness(1.08);text-decoration:none}
+.btn.s{border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+.btn.s:hover{border-color:var(--accent);text-decoration:none}
+.term{max-width:640px;margin:2.4rem auto 0;background:var(--code);border:1px solid var(--line);border-radius:var(--radius);text-align:left;overflow:hidden}
+.term .bar{display:flex;gap:.4rem;padding:.6rem .8rem;border-bottom:1px solid var(--line)}
+.term .bar i{width:11px;height:11px;border-radius:50%;background:#2a3247}
+.term .bar i:first-child{background:#ff5f57}.term .bar i:nth-child(2){background:#febc2e}.term .bar i:nth-child(3){background:#28c840}
+.term pre{padding:1rem 1.2rem;font-size:.88rem;line-height:1.7;overflow-x:auto}
+.term .c{color:#5b657a}.term .g{color:var(--good)}
+section{padding:4rem 0;border-top:1px solid var(--line)}
+h2{font-size:1.7rem;letter-spacing:-.01em;margin-bottom:.5rem}
+.lede{color:var(--mut);max-width:720px;margin-bottom:2rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:1.25rem}
+.card .e{font-size:1.5rem;display:block;margin-bottom:.5rem}
+.card h3{font-size:1.02rem;margin-bottom:.35rem}
+.card p{color:var(--mut);font-size:.92rem}
+table{width:100%;border-collapse:collapse;background:var(--panel);font-size:.93rem}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius)}
+th,td{text-align:left;padding:.7rem .9rem;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mut);font-size:.78rem;text-transform:uppercase;letter-spacing:.05em;background:var(--panel2)}
+tr:last-child td{border-bottom:0}
+td.k{color:var(--mut);white-space:nowrap}
+td.win{color:var(--good);font-weight:550}
+.arch{background:var(--code);border:1px solid var(--line);border-radius:var(--radius);padding:1.4rem;overflow-x:auto;margin-bottom:2rem}
+.arch pre{font-size:.8rem;line-height:1.55;color:#aeb8cc}
+.arch .a{color:var(--accent)}.arch .g{color:var(--good)}.arch .y{color:var(--accent2)}
+details{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.9rem 1.1rem;margin-bottom:.6rem}
+details summary{cursor:pointer;font-weight:600;font-size:.98rem}
+details p{color:var(--mut);margin-top:.6rem;font-size:.94rem}
+footer{border-top:1px solid var(--line);padding:2.5rem 0;color:var(--mut);font-size:.9rem;text-align:center}
+footer .links{margin-bottom:.6rem}
+footer .links a{margin:0 .7rem}
+.credit{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:.9rem 1.1rem;color:var(--mut);font-size:.93rem;margin-top:1.6rem}
+@media (max-width:640px){nav a.nl{display:none}}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <a class="brand" href="#"><img src="kube-claw.png" alt="">kube-claw</a>
+  <a class="nl" href="#features">Features</a>
+  <a class="nl" href="#architecture">Architecture</a>
+  <a class="nl" href="#start">Get started</a>
+  <a class="nl" href="#faq">FAQ</a>
+  <a class="gh" href="https://github.com/bitwave-io/kube-claw">GitHub →</a>
+</div></nav>
+
+<header><div class="wrap">
+  <img class="crab" src="kube-claw-hero.png" alt="kube-claw mascot" width="925" height="499">
+  <h1>kube-claw</h1>
+  <p class="tag">Your team's AI agents. <em>Sandboxed. Audited. In your cluster.</em></p>
+  <p class="sub">A Kubernetes operator that runs Slack-triggered AI agents in one-shot, scale-to-zero
+  pods — with a real secret authority, human-approved credential access, and a control plane
+  that updates itself.</p>
+  <div class="cta">
+    <a class="btn p" href="#start">Get started</a>
+    <a class="btn s" href="https://github.com/bitwave-io/kube-claw">Read the source</a>
+  </div>
+  <div class="term">
+    <div class="bar"><i></i><i></i><i></i></div>
+    <pre>$ curl -fsSL https://kube-claw.com/install.sh | bash
+<span class="c"># @mention the bot in Slack —</span> <span class="g">you're live.</span></pre>
+  </div>
+</div></header>
+
+<section id="why"><div class="wrap">
+  <h2>Why kube-claw?</h2>
+  <p class="lede">Personal AI-agent frameworks are great — for one person on one machine. kube-claw is
+  what you run when the whole team wants agents in Slack, and security wants answers.</p>
+  <div class="tablewrap"><table>
+    <tr><th></th><th>Personal agent frameworks</th><th>kube-claw</th></tr>
+    <tr><td class="k">Runs on</td><td>Your laptop / a VM</td><td class="win">Any Kubernetes cluster (GKE Autopilot to k3d)</td></tr>
+    <tr><td class="k">Isolation boundary</td><td>A local container</td><td class="win">A one-shot K8s Job pod: non-root, dropped caps, optional egress deny, scale-to-zero</td></tr>
+    <tr><td class="k">Credentials</td><td>Env vars / mounted files</td><td class="win">Encrypted secret authority — PAM-style Slack approval, one-time intake links, never in model context or logs</td></tr>
+    <tr><td class="k">Users</td><td>You</td><td class="win">Every channel in your workspace, with per-channel behavior</td></tr>
+    <tr><td class="k">Upgrades</td><td>git pull</td><td class="win">Self-updating: release detected → Slack prompt → digest-pinned apply → auto-rollback watchdog</td></tr>
+    <tr><td class="k">Audit trail</td><td>Shell history</td><td class="win">Hash-chained audit log + full conversation history in the admin dashboard</td></tr>
+  </table></div>
+  <p class="credit">💛 Credit where due: kube-claw was inspired by
+  <a href="https://nanoclaw.dev">nano-claw</a>'s container-per-agent idea — rebuilt as a
+  Kubernetes-native control plane for teams. If you want a personal agent you can read in an
+  afternoon, use nano-claw. If you want the team version with a secret authority, you're home.</p>
+</div></section>
+
+<section id="features"><div class="wrap">
+  <h2>What it does</h2>
+  <p class="lede">Mention the bot, get a sandboxed agent. Everything else — credentials, routing,
+  upgrades, audit — is the control plane's job, not yours.</p>
+  <div class="grid">
+    <div class="card"><span class="e">💬</span><h3>Slack-native</h3>
+      <p>Add the bot to a channel and it configures itself — @-mention-only, replies in threads, by
+      default. It answers in-thread, stays warm for follow-ups, and knows the difference between a
+      thread it started and one it was pulled into.</p></div>
+    <div class="card"><span class="e">📦</span><h3>Pod-per-run sandbox</h3>
+      <p>Every task runs in its own Kubernetes Job: non-root, all capabilities dropped, seccomp,
+      writable workspace, scale-to-zero when idle. The pod <em>is</em> the security boundary.</p></div>
+    <div class="card"><span class="e">🔐</span><h3>A real secret authority</h3>
+      <p>Credentials are encrypted at rest, bound to agent + image, and released only after a human
+      approves in Slack. Values arrive via one-time links — never typed into chat, never in the
+      model's context, never in logs.</p></div>
+    <div class="card"><span class="e">🤖</span><h3>Multi-agent routing</h3>
+      <p>Each agent carries its own base image and editable prompt. A fast classifier reads the
+      request and dispatches to the best fit — cloud-ops asks land on the agent with the cloud SDKs.</p></div>
+    <div class="card"><span class="e">🔄</span><h3>It updates itself</h3>
+      <p>A tiny supervisor watches signed release manifests. New version → Slack prompt to your
+      upgrade admin → digest-pinned apply → a watchdog confirms startup or rolls back. The install is
+      the last <code>helm upgrade</code> you run by hand.</p></div>
+    <div class="card"><span class="e">🧾</span><h3>Audited everything</h3>
+      <p>A hash-chained, tamper-evident audit log; full conversation history; secrets you can rotate
+      but never view — all in a self-hosted admin dashboard with zero build steps.</p></div>
+    <div class="card"><span class="e">⏰</span><h3>Scheduled agents</h3>
+      <p>Cron-triggered runs for standing jobs — the morning cost report posts itself.</p></div>
+    <div class="card"><span class="e">📄</span><h3>Shareable documents</h3>
+      <p>Agents publish design docs and reports as time-bound share links — content stays in your
+      cluster, links expire, reshares revoke old ones.</p></div>
+  </div>
+</div></section>
+
+<section id="architecture"><div class="wrap">
+  <h2>Architecture</h2>
+  <p class="lede">Two small CRDs, one controller, one supervisor. Boring Go you can audit.</p>
+  <div class="arch"><pre>
+ Slack (Socket Mode)
+   │  @mention / thread reply / approval click
+   ▼
+ <span class="a">claw-controller</span>  ──  router · secret authority · run engine · admin UI · API
+   │        │
+   │        └── SQLite store (PVC): runs · secrets (encrypted) · audit (hash-chained)
+   ▼
+ <span class="g">run Jobs</span> (agents namespace)      one pod per task · non-root · scale-to-zero
+   └── claw-runner: Claude tool-use loop · /login attestation · secret materialize
+
+ <span class="y">claw-supervisor</span>  ──  polls release manifest · renders controller StatefulSet
+   ▲        │            digest-pinned applies · startup watchdog · auto-rollback
+   │        ▼
+   └──  <span class="a">ControlPlane CRD</span>   spec = policy (Helm)  ·  annotations = approvals  ·  status = state</pre></div>
+  <div class="grid">
+    <div class="card"><h3>The controller</h3><p>One StatefulSet: Slack router, secret authority,
+      run engine, HTTP API, and the admin dashboard. State in SQLite on a PVC — no external
+      database to run.</p></div>
+    <div class="card"><h3>The runners</h3><p>Published base images (general-purpose, gcloud, aws,
+      azure) or your own. The runner attests its pod identity before it can materialize an
+      approved credential.</p></div>
+    <div class="card"><h3>The secret authority</h3><p>Envelope-encrypted values, granter-checked
+      approvals, on-demand access requests with reasons, revocation that blocks the next run.</p></div>
+    <div class="card"><h3>The supervisor</h3><p>Deliberately tiny and boring: it owns the controller
+      StatefulSet, applies releases by digest, and rolls back anything that doesn't confirm startup —
+      even a bad Helm-driven change.</p></div>
+  </div>
+</div></section>
+
+<section id="principles"><div class="wrap">
+  <h2>Principles</h2>
+  <div class="grid">
+    <div class="card"><span class="e">☸️</span><h3>Kubernetes is the sandbox</h3>
+      <p>Don't reinvent isolation — use the scheduler, the namespace, the NetworkPolicy, the Job.</p></div>
+    <div class="card"><span class="e">🤫</span><h3>Secrets are never chat messages</h3>
+      <p>If a credential ever appears in Slack, the model's context, or a log line, that's a bug —
+      by design, not by policy.</p></div>
+    <div class="card"><span class="e">🖐️</span><h3>Humans approve, machines enforce</h3>
+      <p>Approvals are digest-pinned at click time: what you approved is exactly what runs. No tag
+      TOCTOU, no drift.</p></div>
+    <div class="card"><span class="e">♻️</span><h3>The control plane maintains itself</h3>
+      <p>Upgrades, rollbacks, and release announcements are product features, not runbooks.</p></div>
+    <div class="card"><span class="e">🪨</span><h3>Boring, auditable Go</h3>
+      <p>Two CRDs, a pluggable store, server-rendered HTML. No message bus, no microservice zoo,
+      no JS build step.</p></div>
+    <div class="card"><span class="e">👥</span><h3>Team-first</h3>
+      <p>Channels, upgrade admins, management-channel announcements, break-glass CLI — multiplayer
+      from day one.</p></div>
+  </div>
+</div></section>
+
+<section id="start"><div class="wrap">
+  <h2>Get started</h2>
+  <p class="lede">You need: an authenticated <code>kubectl</code> pointed at any cluster,
+  <code>helm</code>, a Slack app (Socket Mode), and an Anthropic API key. No Docker build —
+  images come from Docker Hub.</p>
+  <div class="term" style="margin:0 0 1.4rem">
+    <div class="bar"><i></i><i></i><i></i></div>
+    <pre>$ curl -fsSL https://kube-claw.com/install.sh | bash
+<span class="c"># prompts for Slack tokens, Anthropic key, admin password —</span>
+<span class="c"># keys land in K8s Secrets, never in Helm values or history.</span>
+<span class="g">✓ control plane rolled out — admin URL + password printed</span></pre>
+  </div>
+  <p style="color:var(--mut);font-size:.94rem">Then add the bot to a Slack channel — it introduces
+  itself and just works (@-mentions, replies in threads). Standing up a fresh GKE Autopilot cluster
+  end-to-end? See <a href="https://github.com/bitwave-io/kube-claw/blob/main/docs/deploy-gke.md">docs/deploy-gke.md</a>.</p>
+  <p>Prefer plain Helm (or want to read the script first)? The chart is self-contained —
+  CRDs included, release signatures verified out of the box:
+  <code>helm install claw oci://registry-1.docker.io/bitwavecode/claw -n claw-system --create-namespace</code></p>
+</div></section>
+
+<section id="faq"><div class="wrap">
+  <h2>FAQ</h2>
+  <details><summary>How is this different from nano-claw?</summary>
+    <p>nano-claw is a personal agent framework — a codebase small enough to read, running containers
+    on your machine, for you. kube-claw takes the same container-per-agent conviction to the team
+    setting: a Kubernetes control plane, a secret authority with human approvals, per-channel Slack
+    behavior, audit trails, and a self-updating release train. Different job, shared soul.</p></details>
+  <details><summary>Where do my API keys and credentials live?</summary>
+    <p>Install-time keys (Slack, Anthropic) are Kubernetes Secrets — never in Helm values or release
+    history. Agent credentials live envelope-encrypted in the controller's store, are released to a
+    pod only after a granter approves, arrive via one-time links, and can be rotated (never viewed)
+    from the dashboard.</p></details>
+  <details><summary>What can an agent actually touch?</summary>
+    <p>Its own pod: non-root, all capabilities dropped, seccomp, a writable workspace, and optional
+    east-west egress deny. A credential is bound to the agent and image it was approved for, and the
+    runner must attest its pod identity to materialize it. Revocation blocks the next run.</p></details>
+  <details><summary>How do upgrades work?</summary>
+    <p>A supervisor polls the release manifest (optionally ed25519-signed, fail-closed). In
+    <code>prompt</code> mode your upgrade admin gets a Slack DM with the release notes; approval
+    applies the exact digests from the manifest; a watchdog waits for the new version to confirm
+    startup and rolls back if it doesn't. <code>auto</code> and <code>manual</code> modes exist too,
+    and a management channel can get all announcements.</p></details>
+  <details><summary>Which models does it use?</summary>
+    <p>Anthropic Claude — a tool-use loop in the runner, with a fast Haiku classifier doing message
+    gating and agent routing. Each agent's system prompt is editable live from the dashboard.</p></details>
+  <details><summary>Do I need a big cluster?</summary>
+    <p>No. It runs on GKE Autopilot and on a laptop k3d. The controller requests 250m CPU / 512Mi;
+    the supervisor 50m / 64Mi; agent pods scale to zero when idle.</p></details>
+  <details><summary>What's the license?</summary>
+    <p>AGPL-3.0. Run it, read it, fix it — and share your changes if you host it for others.</p></details>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="links">
+    <a href="https://github.com/bitwave-io/kube-claw">GitHub</a>
+    <a href="https://github.com/bitwave-io/kube-claw/blob/main/DESIGN.md">Design doc</a>
+    <a href="https://github.com/bitwave-io/kube-claw/releases">Releases</a>
+    <a href="https://nanoclaw.dev">nano-claw</a>
+    <a href="https://bitwave.io">Bitwave</a>
+  </div>
+  <p><img src="kube-claw.png" alt="" style="height:1.1em;width:auto;vertical-align:-.2em;margin-right:.3em">kube-claw · AGPL-3.0 · a Kubernetes-native home for your team's agents</p>
+  <p>Sponsored by <a href="https://bitwave.io">Bitwave</a> — digital asset finance for the enterprise.</p>
+</div></footer>
+
+</body>
+</html>

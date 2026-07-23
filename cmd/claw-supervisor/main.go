@@ -37,7 +37,7 @@ func main() {
 	flag.StringVar(&namespace, "namespace", os.Getenv("POD_NAMESPACE"), "namespace the ControlPlane + controller live in")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe bind address")
 	flag.StringVar(&logFormat, "log-format", "console", `log output format: "console" or "json"`)
-	flag.DurationVar(&checkInterval, "default-check-interval", 6*time.Hour, "release-manifest poll interval when the CR doesn't set one")
+	flag.DurationVar(&checkInterval, "default-check-interval", time.Hour, "release-manifest poll interval when the CR doesn't set one")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(logFormat != "json")))
@@ -67,13 +67,8 @@ func main() {
 		log.Info("slack failure notifications enabled")
 	}
 
-	if err := (&supervisor.Reconciler{Client: mgr.GetClient(), Notify: notify}).SetupWithManager(mgr); err != nil {
-		log.Error(err, "unable to set up ControlPlane reconciler")
-		os.Exit(1)
-	}
-	// Manifest signing (T-9): configured PEM public keys (one or more — a
-	// rotation ring) make signature verification mandatory (fail closed);
-	// absent = unsigned mode.
+	// The poller is built first so the reconciler can poke it for on-demand
+	// release checks (the check-requested annotation).
 	pubKeys, err := supervisor.ParseManifestPublicKeys(os.Getenv("CLAW_MANIFEST_PUBKEY"))
 	if err != nil {
 		log.Error(err, "invalid CLAW_MANIFEST_PUBKEY")
@@ -82,12 +77,18 @@ func main() {
 	if len(pubKeys) > 0 {
 		log.Info("manifest signature verification enabled", "keys", len(pubKeys))
 	}
-	if err := mgr.Add(&supervisor.Poller{
+	poller := &supervisor.Poller{
 		Client:          mgr.GetClient(),
 		Namespace:       namespace,
 		DefaultInterval: checkInterval,
 		PubKeys:         pubKeys,
-	}); err != nil {
+		Kick:            make(chan struct{}, 1),
+	}
+	if err := (&supervisor.Reconciler{Client: mgr.GetClient(), Notify: notify, PokePoller: poller.Poke}).SetupWithManager(mgr); err != nil {
+		log.Error(err, "unable to set up ControlPlane reconciler")
+		os.Exit(1)
+	}
+	if err := mgr.Add(poller); err != nil {
 		log.Error(err, "unable to add release poller")
 		os.Exit(1)
 	}

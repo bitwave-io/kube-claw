@@ -81,7 +81,47 @@ func TestPublishArtifactAndShareLink(t *testing.T) {
 		t.Fatalf("new link = %d", rec.Code)
 	}
 
-	// Resharing an artifact from a different session reads as 404.
+	// Reshare by the OLD (revoked) share link — the handle a rebuilt agent
+	// session still has after its pod was recycled. Slack decorates URLs as
+	// <url|label>; the handler must cope.
+	rr = doAuth(t, h, "POST", "/v1/runs/run-1/artifacts",
+		`{"shareUrl":"<`+pub["url"]+`|design doc>","title":"Design"}`, tok)
+	if rr.Code != 201 {
+		t.Fatalf("shareUrl reshare = %d (%s)", rr.Code, rr.Body)
+	}
+	var re2 map[string]string
+	_ = json.Unmarshal(rr.Body.Bytes(), &re2)
+	if re2["artifactId"] != pub["artifactId"] || re2["url"] == pub["url"] {
+		t.Fatalf("shareUrl reshare response = %v", re2)
+	}
+	if rec := get(strings.TrimPrefix(re2["url"], "http://ui")); rec.Code != 200 {
+		t.Fatalf("shareUrl-reshared link = %d", rec.Code)
+	}
+	// An unknown link reads as the same 404 as an unknown id.
+	if rr := doAuth(t, h, "POST", "/v1/runs/run-1/artifacts",
+		`{"shareUrl":"http://ui/d/0000","title":"Design"}`, tok); rr.Code != 404 {
+		t.Fatalf("unknown shareUrl reshare = %d (%s)", rr.Code, rr.Body)
+	}
+
+	// The session's documents are listable (metadata only) by any of its runs.
+	if rr := do(t, h, "GET", "/v1/runs/run-1/artifacts", ""); rr.Code != 401 {
+		t.Fatalf("unauthenticated list = %d", rr.Code)
+	}
+	rr = doAuth(t, h, "GET", "/v1/runs/run-1/artifacts", "", tok)
+	if rr.Code != 200 {
+		t.Fatalf("list = %d (%s)", rr.Code, rr.Body)
+	}
+	var list struct {
+		Documents []map[string]string `json:"documents"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &list)
+	if len(list.Documents) != 1 || list.Documents[0]["artifactId"] != pub["artifactId"] ||
+		list.Documents[0]["title"] != "Design" || list.Documents[0]["content"] != "" {
+		t.Fatalf("list body = %s", rr.Body)
+	}
+
+	// Resharing an artifact from a different session reads as 404 — by id and
+	// by link alike — and its documents don't show up in the other session's list.
 	if err := s.Store.Tx(ctx, func(tx store.Tx) error {
 		return tx.CreateRun(store.Run{ID: "run-9", AgentNamespace: "claw-agents", AgentName: "gcp-cost",
 			SessionID: "th-OTHER", Phase: "Running"})
@@ -92,5 +132,29 @@ func TestPublishArtifactAndShareLink(t *testing.T) {
 	if rr := doAuth(t, h, "POST", "/v1/runs/run-9/artifacts",
 		`{"artifactId":"`+pub["artifactId"]+`","title":"Design"}`, tok9); rr.Code != 404 {
 		t.Fatalf("cross-session reshare = %d (%s)", rr.Code, rr.Body)
+	}
+	if rr := doAuth(t, h, "POST", "/v1/runs/run-9/artifacts",
+		`{"shareUrl":"`+pub["url"]+`","title":"Design"}`, tok9); rr.Code != 404 {
+		t.Fatalf("cross-session shareUrl reshare = %d (%s)", rr.Code, rr.Body)
+	}
+	rr = doAuth(t, h, "GET", "/v1/runs/run-9/artifacts", "", tok9)
+	_ = json.Unmarshal(rr.Body.Bytes(), &list)
+	if rr.Code != 200 || len(list.Documents) != 0 {
+		t.Fatalf("cross-session list = %d (%s)", rr.Code, rr.Body)
+	}
+}
+
+func TestShareURLToken(t *testing.T) {
+	for in, want := range map[string]string{
+		"abc123":                          "abc123",
+		"http://ui/d/abc123":              "abc123",
+		"http://ui/d/abc123?x=1":          "abc123",
+		"<http://ui/d/abc123>":            "abc123",
+		"<http://ui/d/abc123|design doc>": "abc123",
+		" http://ui/d/abc123/ ":           "abc123",
+	} {
+		if got := shareURLToken(in); got != want {
+			t.Errorf("shareURLToken(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

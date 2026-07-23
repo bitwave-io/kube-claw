@@ -2,6 +2,7 @@ package apihttp
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -11,6 +12,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/store"
@@ -20,6 +22,19 @@ import (
 // The self-hosted admin dashboard (DESIGN.md §UI): secrets (rotate, never view),
 // recent conversations for audit, agents, base images, and channel routing.
 // Server-rendered html/template — no build step, no JS framework.
+
+// logoPNG is the mascot shown in the dashboard nav, embedded so the binary
+// stays self-contained (no static-asset volume). Served at GET /ui/logo.png.
+//
+//go:embed logo.png
+var logoPNG []byte
+
+// logo serves the embedded mascot for the dashboard nav.
+func (s *Server) logo(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(logoPNG)
+}
 
 const dashHead = `<!doctype html><html><head><meta charset=utf-8>
 <title>kube-claw · {{.Title}}</title>
@@ -50,7 +65,7 @@ button{font:inherit;padding:.3rem .7rem;border:1px solid var(--accent);backgroun
 .turn .who{font-weight:700;font-size:.72rem;text-transform:uppercase;letter-spacing:.03em;display:block;margin-bottom:.15rem}
 .turn.u{background:#fbfdff}.turn.u .who{color:#1967d2}.turn.a .who{color:#137333}
 </style></head><body>
-<nav><span class=brand>🦞 kube-claw</span>
+<nav><span class=brand><img src=/ui/logo.png alt="" style="height:1.3rem;width:auto;vertical-align:-.28rem;margin-right:.4rem"> kube-claw</span>
 <a href=/ui/dashboard class="{{if eq .Active "dashboard"}}on{{end}}">Dashboard</a>
 <a href=/ui/secrets class="{{if eq .Active "secrets"}}on{{end}}">Secrets</a>
 <a href=/ui/gitrepos class="{{if eq .Active "gitrepos"}}on{{end}}">Git repos</a>
@@ -532,8 +547,23 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 <label>Management channel <input name=mgmtChannel value="{{.D.Mgmt}}" placeholder="C0123456789">{{if .D.MgmtName}} <span class=mut>= {{.D.MgmtName}}</span>{{end}}</label>
 <button type=submit>Save</button>
 </form>
-<p class=mut>The management channel gets release announcements and upgrade lifecycle events (available, applied, rolled back). The bot must be a member of it. Also settable by DMing the bot <code>announce releases in #channel</code>.</p>`
+<p class=mut>The management channel gets release announcements and upgrade lifecycle events (available, applied, rolled back). The bot must be a member of it. Also settable by DMing the bot <code>announce releases in #channel</code>.</p>
+<h2>Releases</h2>
+<form method=post action=/ui/settings/check-upgrades>
+<button type=submit>Check for updates now</button>
+</form>
+<p class=mut>Requests an immediate release check from the supervisor (instead of waiting for the next scheduled poll). New releases surface as usual: a prompt to the upgrade admin, an announcement in the management channel. Also: DM the bot <code>check for updates</code> or run <code>claw upgrade check</code>.</p>`
 	s.renderDash(w, "settings", "Settings", body, data)
+}
+
+// uiCheckUpgrades requests an immediate release check (settings-page button).
+func (s *Server) uiCheckUpgrades(w http.ResponseWriter, r *http.Request) {
+	if s.Upgrades != nil {
+		if err := s.Upgrades.CheckNow(r.Context()); err != nil {
+			logf.Log.WithName("apihttp").Error(err, "ui check-upgrades")
+		}
+	}
+	http.Redirect(w, r, "/ui/settings", http.StatusSeeOther)
 }
 
 // uiSetSettings applies the settings form (upgrade admin + management channel).

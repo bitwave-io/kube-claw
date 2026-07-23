@@ -1,4 +1,6 @@
-# 🦞 kube-claw
+<img src="images/kube-claw-square-transparent.png" alt="kube-claw" width="200">
+
+# kube-claw
 
 **A Kubernetes operator that runs sandboxed, Slack-triggered AI agents — with a real secret-authority and human-approved, audited credential access.**
 
@@ -19,6 +21,13 @@ value never enters the model's context or the logs.
 **Prerequisites:** an authenticated `kubectl` pointed at any cluster, `helm`, and a
 Slack app + Anthropic API key. No Docker build, no repo clone — the chart and images
 are published to Docker Hub (`docker.io/bitwavecode/*`).
+
+**One-liner** (interactive — prompts for tokens/keys, stores them as Kubernetes
+Secrets, rolls out the control plane; no clone needed):
+
+```bash
+curl -fsSL https://kube-claw.com/install.sh | bash
+```
 
 **Helm-only install** (the chart is self-contained — CRDs included, signed
 self-updates verified out of the box; every knob is a value):

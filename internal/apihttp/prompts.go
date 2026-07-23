@@ -3,6 +3,7 @@ package apihttp
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/store"
@@ -32,11 +33,31 @@ func (s *Server) claimNextTurn(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	// A warm pod's access token is bound to the run it logged in for; every later
+	// turn is a DIFFERENT run, so run-scoped calls (request_secret, outputs) would
+	// 401 with the login-run token. Hand back a fresh token scoped to THIS run so
+	// the pod can install it before serving the turn. The pod already proved its
+	// identity via the session token (authSession) and ClaimNextPendingTurn only
+	// returns a run for this session+pod, so no re-attestation is needed here.
+	allowed, err := s.grantedSecretNames(r.Context(), run)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	expiresAt := time.Now().Add(accessTokenTTL).Unix()
+	tok, err := s.Signer.Issue(run.ID, allowed, accessTokenTTL)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	var in struct {
 		Text string `json:"text"`
 	}
 	_ = json.Unmarshal([]byte(run.Input), &in)
-	writeJSON(w, http.StatusOK, map[string]string{"runId": run.ID, "input": in.Text})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"runId": run.ID, "input": in.Text,
+		"token": tok, "expiresAt": expiresAt, "secrets": allowed,
+	})
 }
 
 // sessionSleep is called by a warm pod when it idles out — it adds a 💤 to the

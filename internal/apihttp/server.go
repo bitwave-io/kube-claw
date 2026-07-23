@@ -18,8 +18,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -101,6 +103,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/outputs", s.postOutput)
 	mux.HandleFunc("POST /v1/runs/{id}/artifacts", s.publishArtifact)
+	mux.HandleFunc("GET /v1/runs/{id}/artifacts", s.listArtifacts)
+	mux.HandleFunc("POST /v1/runs/{id}/register-secret", s.agentRegisterSecret)
+	mux.HandleFunc("POST /v1/runs/{id}/announce-channel", s.agentSetAnnounceChannel)
 	mux.HandleFunc("POST /v1/runs/{id}/progress", s.postProgress)
 	mux.HandleFunc("POST /v1/secrets", s.createSecret)
 	mux.HandleFunc("GET /v1/secrets/{name}/metadata", s.secretMetadata)
@@ -133,6 +138,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}/available-secrets", s.availableSecrets)
 	mux.HandleFunc("POST /v1/runs/{id}/request-secret", s.requestSecret)
 	mux.HandleFunc("GET /v1/runs/{id}/requested-secret", s.requestedSecret)
+	mux.HandleFunc("POST /v1/runs/{id}/request-schedule", s.requestSchedule)
+	mux.HandleFunc("GET /v1/runs/{id}/schedules", s.runSchedules)
 	mux.HandleFunc("POST /v1/gitrepos", s.createGitRepo)
 	mux.HandleFunc("GET /v1/gitrepos", s.listGitRepos)
 	mux.HandleFunc("DELETE /v1/gitrepos/{name}", s.deleteGitRepo)
@@ -160,6 +167,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/version", s.getVersion)
 	mux.HandleFunc("GET /v1/upgrade/status", s.upgradeStatus)
 	mux.HandleFunc("POST /v1/upgrade/approve", s.upgradeApprove)
+	mux.HandleFunc("POST /v1/upgrade/check", s.upgradeCheck)
 	mux.HandleFunc("GET /v1/settings", s.listSettings)
 	mux.HandleFunc("PUT /v1/settings/{key}", s.setSetting)
 	mux.HandleFunc("GET /v1/schedules", s.listSchedules)
@@ -167,7 +175,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/schedules/{id}", s.deleteScheduleAPI)
 	mux.HandleFunc("GET /ui/schedules", s.schedulesPage)
 	mux.HandleFunc("POST /ui/schedules/create", s.uiCreateSchedule)
+	mux.HandleFunc("POST /ui/schedules/enable", s.uiEnableSchedule)
 	mux.HandleFunc("POST /ui/schedules/delete", s.uiDeleteSchedule)
+	mux.HandleFunc("GET /ui/logo.png", s.logo)
 	mux.HandleFunc("GET /ui", s.dashboardHome)
 	mux.HandleFunc("GET /ui/dashboard", s.dashboardHome)
 	mux.HandleFunc("GET /ui/secrets", s.secretsPage)
@@ -191,6 +201,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/channels", s.channelsPage)
 	mux.HandleFunc("GET /ui/settings", s.settingsPage)
 	mux.HandleFunc("POST /ui/settings", s.uiSetSettings)
+	mux.HandleFunc("POST /ui/settings/check-upgrades", s.uiCheckUpgrades)
 	mux.HandleFunc("GET /ui/models", s.modelsPage)
 	mux.HandleFunc("POST /ui/models", s.modelsSubmit)
 	return s.withAdminAuth(mux)
@@ -416,7 +427,11 @@ func (s *Server) postProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Notifier != nil {
 		if ch := slackrouter.SlackChannel(run.Source); ch != "" {
-			if e := s.Notifier.PostReply(r.Context(), ch, run.SessionID, req.Text); e != nil {
+			sessTS := run.SessionID
+			if slackrouter.SlackIsDM(run.Source) {
+				sessTS = "" // a DM session id is the IM channel, not a thread ts
+			}
+			if e := s.Notifier.PostReply(r.Context(), ch, sessTS, req.Text); e != nil {
 				logf.Log.WithName("apihttp").Error(e, "post slack progress", "run", id)
 			}
 		}
@@ -507,12 +522,16 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 	if s.Notifier != nil {
 		if ch := slackrouter.SlackChannel(run.Source); ch != "" {
 			threadTS := run.SessionID // default: reply in-thread
-			_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
-				if replyTopLevel(tx, run, ch) {
-					threadTS = ""
-				}
-				return nil
-			})
+			if slackrouter.SlackIsDM(run.Source) {
+				threadTS = "" // DM replies post straight to the IM channel
+			} else {
+				_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+					if replyTopLevel(tx, run, ch) {
+						threadTS = ""
+					}
+					return nil
+				})
+			}
 			if e := s.Notifier.PostReply(r.Context(), ch, threadTS, req.Content); e != nil {
 				logf.Log.WithName("apihttp").Error(e, "post slack reply", "run", id)
 			}
@@ -564,9 +583,25 @@ func replyTopLevel(tx store.Tx, run store.Run, channel string) bool {
 
 type publishArtifactReq struct {
 	ArtifactID string `json:"artifactId"` // set to reshare an existing document
+	ShareURL   string `json:"shareUrl"`   // reshare alternative: a previous share link (or bare token), accepted even expired
 	Title      string `json:"title"`
 	Content    string `json:"content"` // markdown
 	TTL        string `json:"ttl"`     // Go duration, e.g. "24h"; empty = default
+}
+
+// shareURLToken extracts the raw share token from however the agent quotes a
+// previous link: a bare token, a full URL, or Slack's decorated forms
+// (<https://…/d/tok> or <https://…/d/tok|label>).
+func shareURLToken(s string) string {
+	s = strings.Trim(strings.TrimSpace(s), "<>")
+	if i := strings.IndexAny(s, "|?#"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimRight(s, "/")
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
 }
 
 // publishArtifact is the runner→controller callback behind the agent's
@@ -610,10 +645,15 @@ func (s *Server) publishArtifact(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	pub, err := s.Artifacts.Publish(r.Context(), id, run.SessionID, req.ArtifactID, req.Title, req.Content, ttl)
+	var shareToken string
+	if req.ShareURL != "" {
+		shareToken = shareURLToken(req.ShareURL)
+	}
+	pub, err := s.Artifacts.Publish(r.Context(), id, run.SessionID, req.ArtifactID, shareToken, req.Title, req.Content, ttl)
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, artifacts.ErrWrongSession):
-		// One 404 for both — an agent probing other sessions' artifact ids learns nothing.
+		// One 404 for unknown id, unknown link, and wrong session alike — an
+		// agent probing other sessions' artifacts learns nothing.
 		writeErr(w, http.StatusNotFound, "artifact not found")
 		return
 	case errors.Is(err, artifacts.ErrContentTooLarge):
@@ -628,6 +668,149 @@ func (s *Server) publishArtifact(w http.ResponseWriter, r *http.Request) {
 		"url":        s.UIBase + "/d/" + pub.Token,
 		"expiresAt":  pub.ExpiresAt.Format(time.RFC3339),
 	})
+}
+
+// listArtifacts is the runner→controller callback behind the agent's
+// list_documents tool: the session's published documents (id + title, never
+// content), so an agent whose pod was recycled can still find the artifact_id
+// it needs to reshare.
+func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.authRunInSession(r, id) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	var run store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetRun(id)
+		run = got
+		return e
+	}); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	docs, err := s.Artifacts.List(r.Context(), run.SessionID, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]map[string]string, 0, len(docs))
+	for _, d := range docs {
+		out = append(out, map[string]string{
+			"artifactId": d.ID,
+			"title":      d.Title,
+			"createdAt":  d.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"documents": out})
+}
+
+// agentRegisterSecret is the runner→controller callback behind the agent's
+// register_secret tool — the conversational successor to the deterministic
+// "register secret" DM command (which still works). It creates the secret with
+// the REQUESTING SLACK USER as granter and mints a one-time intake link; the
+// agent (and the controller) never see the value. Slack-originated runs only:
+// the human in the conversation is the authority the grant hangs off.
+func (s *Server) agentRegisterSecret(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.authRunInSession(r, id) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	var req struct{ Name, Description string }
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil || req.Name == "" {
+		writeErr(w, http.StatusBadRequest, "name required")
+		return
+	}
+	var run store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetRun(id)
+		run = got
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	user := slackrouter.SlackUser(run.Source)
+	if user == "" {
+		writeErr(w, http.StatusForbidden, "only Slack-originated runs can register secrets (the requesting user becomes the approver)")
+		return
+	}
+	if s.Secrets == nil {
+		writeErr(w, http.StatusServiceUnavailable, "secret registration isn't configured on this controller")
+		return
+	}
+	const ns = "claw-agents" // parity with the DM command
+	_, _ = s.Secrets.CreateSecret(r.Context(), ns, req.Name, "", req.Description, []string{user})
+	tok, err := s.Secrets.MintIntakeToken(r.Context(), ns, req.Name, "")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"name": req.Name, "granter": user,
+		"url": s.UIBase + "/ui/secret-intake/" + tok,
+	})
+}
+
+// slackChannelID validates an encoded Slack channel id for the
+// announce-channel tool.
+var slackChannelID = regexp.MustCompile(`^C[A-Z0-9]+$`)
+
+// agentSetAnnounceChannel is the runner→controller callback behind the agent's
+// set_release_announce_channel tool. Same authority rule as the DM command:
+// once an upgrade admin is claimed, only the admin may move it.
+func (s *Server) agentSetAnnounceChannel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.authRunInSession(r, id) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	var req struct{ Channel string }
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Channel != "" && !slackChannelID.MatchString(req.Channel) {
+		writeErr(w, http.StatusBadRequest, "not a Slack channel id (want C…; extract it from the <#C…|name> reference)")
+		return
+	}
+	var run store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetRun(id)
+		run = got
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	user := slackrouter.SlackUser(run.Source)
+	if user == "" {
+		writeErr(w, http.StatusForbidden, "only Slack-originated runs can change the management channel")
+		return
+	}
+	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		admin, e := tx.GetSetting(store.SettingUpgradeAdmin)
+		if e != nil && !errors.Is(e, store.ErrNotFound) {
+			return e
+		}
+		if admin != "" && admin != user {
+			return fmt.Errorf("only the upgrade admin (<@%s>) can change where releases are announced", admin)
+		}
+		return tx.SetSetting(store.SettingMgmtChannel, req.Channel)
+	})
+	if err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	status := "set"
+	if req.Channel == "" {
+		status = "cleared"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": status, "channel": req.Channel})
 }
 
 // --- secrets (Phase 3) ---

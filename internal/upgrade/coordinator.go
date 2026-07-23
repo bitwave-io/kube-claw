@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/util/retry"
@@ -214,8 +215,10 @@ func (c *Coordinator) maybePrompt(ctx context.Context, cp *clawv1alpha1.ControlP
 	// FYI to the management channel (no buttons — approval stays personal).
 	if mgmt != "" {
 		text := fmt.Sprintf(":package: kube-claw *%s* is available (running %s).", avail, orDev(cp.Status.RunningVersion))
-		if cp.Status.AvailableNotes != "" {
-			text += "\n> " + cp.Status.AvailableNotes
+		if notes := strings.TrimSpace(cp.Status.AvailableNotes); notes != "" {
+			// Blockquote every line — multi-line notes (tag message bodies)
+			// otherwise escape the quote after the first line.
+			text += "\n> " + strings.ReplaceAll(notes, "\n", "\n> ")
 		}
 		switch {
 		case reason != "":
@@ -237,6 +240,24 @@ func (c *Coordinator) maybePrompt(ctx context.Context, cp *clawv1alpha1.ControlP
 		logf.Log.WithName("upgrade").Info("posted upgrade prompt", "available", avail, "canApply", canApply)
 	}
 	return c.setSetting(ctx, store.SettingNotifiedVersion, avail)
+}
+
+// CheckNow requests an immediate release check: it stamps the
+// check-requested annotation on the ControlPlane; the supervisor's reconciler
+// wakes the poller, which consumes the annotation and polls. Results surface
+// through the normal path (status.available* → prompt/announcement).
+func (c *Coordinator) CheckNow(ctx context.Context) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var cp clawv1alpha1.ControlPlane
+		if err := c.Reader.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: c.Name}, &cp); err != nil {
+			return err
+		}
+		if cp.Annotations == nil {
+			cp.Annotations = map[string]string{}
+		}
+		cp.Annotations[clawv1alpha1.AnnotationCheckRequested] = time.Now().UTC().Format(time.RFC3339)
+		return c.Writer.Update(ctx, &cp)
+	})
 }
 
 // --- slackrouter.UpgradeActor + CLI break-glass -----------------------------
