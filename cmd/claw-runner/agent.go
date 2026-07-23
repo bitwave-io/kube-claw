@@ -283,7 +283,7 @@ func newAgentSession(systemPrompt string) *agentSession {
 		"Bash commands are killed after 90 seconds and long output is truncated — use non-interactive flags, and narrow output with grep/head/--format instead of dumping everything.",
 		"Before each slow or significant command, say in one short sentence what you're about to do. That narration is shown to the user as live progress while they wait.",
 		"You are chatting in Slack. Format replies as Slack mrkdwn: *single asterisks* for bold, _underscores_ for italic, `backticks` for code, ``` fenced blocks ``` for command output, and simple - bullets. NEVER use Markdown headers (#), **double asterisks**, or tables — they render as literal characters in Slack. Messages may arrive prefixed with the sender's Slack id (`<@U…>:`), and you can mention a user the same way.",
-		"You are ONE PARTICIPANT in a team conversation, not its owner. The humans in the thread also talk to EACH OTHER: if the latest message is addressed to another person, is two people coordinating between themselves, or otherwise needs nothing from you, reply with exactly "+noReply+" (nothing else) and no message will be posted.",
+		"You are ONE PARTICIPANT in a team conversation, not its owner. The humans in the thread also talk to EACH OTHER: if the latest message is addressed to another person, is two people coordinating between themselves, or otherwise needs nothing from you, reply with exactly "+noReply+" (nothing else — no formatting, no token-usage line) and no message will be posted.",
 		"SCOPE: do exactly what you were asked, then stop. An idea someone floats in passing (\"this could also help us consolidate X\") is context, NOT a task — do not start on it, do not draft a plan for it, and do not request credentials for it. If you think you could help with something nobody assigned you, offer it in ONE short sentence at most, and drop it unless someone explicitly says yes.",
 		"Never begin multi-step work (inventories, audits, designs, migrations) on your own initiative. Say what you would do in a sentence or two and wait for an explicit go-ahead before doing any of it.",
 		"Answer the specific question that was asked, concisely. Do not append capability menus, offers of other things you could look into, or plans for work beyond the question.",
@@ -479,7 +479,11 @@ func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
 	// answered turn's user message — mirroring how the live turn saw them.
 	var pending []string
 	for _, t := range out.Turns {
-		if t.Output == "" {
+		// Stored outputs carry the Slack usage footer; strip it so the replayed
+		// conversation matches what a warm pod's history looks like — and so the
+		// model doesn't learn to append footers (or worse, one to its NO_REPLY).
+		ans := stripUsageFooter(t.Output)
+		if ans == "" {
 			pending = append(pending, t.Input)
 			continue
 		}
@@ -490,7 +494,7 @@ func (s *agentSession) loadHistory(ctx context.Context, sessionID string) {
 		}
 		s.messages = append(s.messages,
 			anthropic.NewUserMessage(anthropic.NewTextBlock(in)),
-			anthropic.NewAssistantMessage(anthropic.NewTextBlock(t.Output)))
+			anthropic.NewAssistantMessage(anthropic.NewTextBlock(ans)))
 	}
 	// Trailing unanswered messages have no answered turn to ride with; a
 	// synthetic ack keeps the alternation valid without inventing an answer.
@@ -707,8 +711,11 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 		return "", fmt.Errorf("agent produced no text answer")
 	}
 	// The agent judged the message wasn't for it — suppress the reply entirely
-	// (the sentinel is the whole answer; ignore any narration before it).
-	if strings.TrimSpace(final[len(final)-1]) == noReply {
+	// (the sentinel is the whole answer; ignore any narration before it). The
+	// model sometimes decorates the sentinel — a mimicked usage footer (learned
+	// from replayed history), italics — so compare after stripping those, or the
+	// literal sentinel ends up posted to the thread.
+	if strings.Trim(strings.TrimSpace(stripUsageFooter(final[len(final)-1])), "*_` ") == noReply {
 		return noReply, nil
 	}
 	// Tag every reply with the turn's token usage. The pod's first reply also
@@ -855,6 +862,30 @@ func (s *agentSession) streamModel(ctx context.Context, params anthropic.Message
 }
 
 // fmtTokens renders a token count compactly for the reply footer (837, 45.2k, 1.3M).
+// usageFooterLine matches one usage-footer line — the `_tokens: 15.9k in · 8
+// out_` / `_agent: general · model: … · tokens: …_` tail that turn() appends to
+// every posted reply, with the markup optional so it also catches a model
+// MIMICKING the footer after seeing it in replayed history.
+var usageFooterLine = regexp.MustCompile(`^_?(agent: [^·\n]+ · )?(model: [^·\n]+ · )?tokens: [\d.,]+[kM]? in · [\d.,]+[kM]? out_?$`)
+
+// stripUsageFooter removes trailing usage-footer lines from an answer. Used on
+// replayed history (the footer is Slack presentation, not conversation — left
+// in, the model learns to imitate it) and on the noReply sentinel check (a
+// mimicked footer must not turn a NO_REPLY into a posted message).
+func stripUsageFooter(s string) string {
+	for {
+		s = strings.TrimRight(s, " \t\n")
+		i := strings.LastIndex(s, "\n")
+		if !usageFooterLine.MatchString(strings.TrimSpace(s[i+1:])) {
+			return s
+		}
+		if i < 0 {
+			return ""
+		}
+		s = s[:i]
+	}
+}
+
 func fmtTokens(n int64) string {
 	switch {
 	case n >= 1_000_000:
