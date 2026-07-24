@@ -22,7 +22,7 @@ import (
 // A warm pod logs in for its first run, then claims a LATER turn in the same
 // session (a different run). claim-next must hand back an access token scoped to
 // the CLAIMED run — otherwise the pod keeps using the login-run token and every
-// run-scoped call on the follow-up turn (request_secret, gitrepo access) 401s,
+// run-scoped call on the follow-up turn (e.g. request_secret) 401s,
 // since those endpoints require an exact run-id match.
 func TestClaimNextTurn_RescopesTokenToClaimedRun(t *testing.T) {
 	st, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "claw.db"))
@@ -86,7 +86,7 @@ func TestClaimNextTurn_RescopesTokenToClaimedRun(t *testing.T) {
 		t.Fatalf("claim-next returned no run-scoped token (token=%q expiresAt=%d)", out.Token, out.ExpiresAt)
 	}
 	// The crux: the fresh token must be scoped to run-2, the run this turn will
-	// make its request_secret / gitrepo calls against.
+	// make its request_secret calls against.
 	c, err := signer.Verify(out.Token)
 	if err != nil {
 		t.Fatalf("returned token does not verify: %v", err)

@@ -32,7 +32,6 @@ import (
 	"github.com/traego/kube-claw/internal/approvals"
 	"github.com/traego/kube-claw/internal/artifacts"
 	"github.com/traego/kube-claw/internal/connector"
-	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
 	"github.com/traego/kube-claw/internal/models"
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
@@ -52,7 +51,6 @@ type Server struct {
 	Signer    *identity.Signer      // claw session token signer
 	Approvals *approvals.Service    // shared approval path
 	Artifacts *artifacts.Service    // published documents + share links
-	GitRepos  *gitrepo.Service      // git-repo access approval authority
 	Models    *models.Service       // LLM registry (multi-model support)
 	Router    *slackrouter.Router   // connector routing (nil if no routes configured)
 	Notifier  *slackrouter.Notifier // posts replies/approvals to Slack (nil if no bot token)
@@ -140,23 +138,17 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}/requested-secret", s.requestedSecret)
 	mux.HandleFunc("POST /v1/runs/{id}/request-schedule", s.requestSchedule)
 	mux.HandleFunc("GET /v1/runs/{id}/schedules", s.runSchedules)
-	mux.HandleFunc("POST /v1/gitrepos", s.createGitRepo)
-	mux.HandleFunc("GET /v1/gitrepos", s.listGitRepos)
-	mux.HandleFunc("DELETE /v1/gitrepos/{name}", s.deleteGitRepo)
-	mux.HandleFunc("GET /v1/gitrepo-requests", s.listGitRepoRequests)
-	mux.HandleFunc("POST /v1/gitrepo-requests/{id}/approve", s.approveGitRepoRequest)
-	mux.HandleFunc("POST /v1/gitrepo-requests/{id}/deny", s.denyGitRepoRequest)
 	mux.HandleFunc("GET /v1/models", s.listModels)
 	mux.HandleFunc("POST /v1/models", s.upsertModel)
 	mux.HandleFunc("DELETE /v1/models/{name}", s.deleteModel)
 	mux.HandleFunc("POST /v1/models/{name}/default", s.setDefaultModel)
+	mux.HandleFunc("POST /v1/models/{name}/enabled", s.setModelEnabled)
+	mux.HandleFunc("GET /v1/providers", s.listProviders)
+	mux.HandleFunc("POST /v1/providers", s.upsertProvider)
+	mux.HandleFunc("DELETE /v1/providers/{name}", s.deleteProvider)
+	mux.HandleFunc("POST /v1/providers/{name}/sync", s.syncProvider)
 	mux.HandleFunc("GET /v1/runs/{id}/model", s.runModel)
 	mux.HandleFunc("POST /v1/runs/{id}/model", s.switchRunModel)
-	mux.HandleFunc("GET /v1/gitrepo-grants", s.listGitRepoGrants)
-	mux.HandleFunc("POST /v1/gitrepo-grants/{id}/revoke", s.revokeGitRepoGrant)
-	mux.HandleFunc("GET /v1/runs/{id}/available-gitrepos", s.availableGitRepos)
-	mux.HandleFunc("POST /v1/runs/{id}/request-gitrepo", s.requestGitRepo)
-	mux.HandleFunc("GET /v1/runs/{id}/requested-gitrepo", s.requestedGitRepo)
 	mux.HandleFunc("POST /v1/sessions/{id}/claim-next", s.claimNextTurn)
 	mux.HandleFunc("POST /v1/sessions/{id}/sleep", s.sessionSleep)
 	mux.HandleFunc("GET /v1/prompts", s.listPrompts)
@@ -186,11 +178,6 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/requests", s.requestsPage)
 	mux.HandleFunc("POST /ui/requests/approve", s.uiApproveRequest)
 	mux.HandleFunc("POST /ui/requests/deny", s.uiDenyRequest)
-	mux.HandleFunc("GET /ui/gitrepos", s.gitReposPage)
-	mux.HandleFunc("POST /ui/gitrepos/create", s.uiCreateGitRepo)
-	mux.HandleFunc("POST /ui/gitrepos/delete", s.uiDeleteGitRepo)
-	mux.HandleFunc("POST /ui/gitrepo-requests/approve", s.uiApproveGitRepoRequest)
-	mux.HandleFunc("POST /ui/gitrepo-requests/deny", s.uiDenyGitRepoRequest)
 	mux.HandleFunc("GET /ui/audit", s.auditPage)
 	mux.HandleFunc("GET /ui/conversations", s.conversationsPage)
 	mux.HandleFunc("GET /ui/agents", s.agentsPage)

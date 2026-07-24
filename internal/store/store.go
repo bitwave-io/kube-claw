@@ -173,42 +173,6 @@ type Tx interface {
 	// DeleteConnector removes a connector.
 	DeleteConnector(id string) error
 
-	// --- git repos (agent-requestable repositories, gitrepo plane) ---
-
-	// CreateGitRepo registers a repository (URL + credentials + granters).
-	CreateGitRepo(g GitRepo) error
-	// GetGitRepo returns a repo by namespace/name (incl. granters), or ErrNotFound.
-	GetGitRepo(namespace, name string) (GitRepo, error)
-	// GetGitRepoByID returns a repo by id (incl. granters), or ErrNotFound.
-	GetGitRepoByID(id string) (GitRepo, error)
-	// ListGitRepos returns all repo metadata (never credentials), for the admin UI.
-	ListGitRepos() ([]GitRepo, error)
-	// DeleteGitRepo removes a repo and its granters, grants, and requests.
-	DeleteGitRepo(namespace, name string) error
-
-	// CreateGitRepoGrant stores a durable git-repo grant.
-	CreateGitRepoGrant(g GitRepoGrant) error
-	// FindValidGitRepoGrant returns a non-revoked grant matching the binding
-	// (agent + repo + digest + spec hash), or ErrNotFound. Access level is on the
-	// returned grant; callers check it with gitrepo.Satisfies.
-	FindValidGitRepoGrant(ns, agent, repoID, digest, specHash string) (GitRepoGrant, error)
-	// RevokeGitRepoGrant marks a git-repo grant revoked.
-	RevokeGitRepoGrant(id, reason string) error
-	// ListGitRepoGrants returns git-repo grants for an agent.
-	ListGitRepoGrants(ns, agent string) ([]GitRepoGrant, error)
-
-	// CreateGitRepoRequest stores a pending git-repo access request.
-	CreateGitRepoRequest(req GitRepoRequest) error
-	// GetGitRepoRequest returns a request by id, or ErrNotFound.
-	GetGitRepoRequest(id string) (GitRepoRequest, error)
-	// GetPendingGitRepoRequest returns the Pending request for an agent+repo at
-	// the given access level, or ErrNotFound (dedupe).
-	GetPendingGitRepoRequest(ns, agent, repoID, access string) (GitRepoRequest, error)
-	// ListGitRepoRequests returns requests with the given status (all if "").
-	ListGitRepoRequests(status string) ([]GitRepoRequest, error)
-	// SetGitRepoRequestStatus updates a request's status.
-	SetGitRepoRequestStatus(id, status string) error
-
 	// --- install-wide settings (key/value, DESIGN.md §24.6) ---
 
 	// SetSetting creates or replaces a setting.
@@ -263,6 +227,26 @@ type Tx interface {
 	SetSessionModel(sessionID, modelName, setBy string) error
 	// GetSessionModel returns the session's pinned model name, or ErrNotFound.
 	GetSessionModel(sessionID string) (string, error)
+	// SetModelEnabled flips a model's enabled flag (selective disable). Discovered
+	// and manual models both honor it. ErrNotFound if the model doesn't exist.
+	SetModelEnabled(name string, enabled bool) error
+
+	// --- providers (hosted LLM providers whose catalogs seed the model registry) ---
+
+	// UpsertProvider creates or replaces a provider (a hosted API whose model
+	// list is pulled periodically). An empty api_key_cipher on update KEEPS the
+	// stored key (like UpsertModel).
+	UpsertProvider(p Provider) error
+	// GetProvider returns a provider by name, or ErrNotFound.
+	GetProvider(name string) (Provider, error)
+	// ListProviders returns all providers, by name.
+	ListProviders() ([]Provider, error)
+	// DeleteProvider removes a provider AND the models its catalog discovered
+	// (and their session pins) — deleting a provider revokes its models.
+	DeleteProvider(name string) error
+	// SetProviderSyncState records the outcome of a catalog refresh: the sync
+	// timestamp and the last error ("" clears a prior error).
+	SetProviderSyncState(name, syncedAt, syncErr string) error
 
 	// --- schedules (cron-triggered agent invocations) ---
 
@@ -327,64 +311,6 @@ type Connector struct {
 	AgentName      string `json:"agentName"`
 	Disabled       bool   `json:"disabled"`
 	CreatedAt      string `json:"createdAt"`
-}
-
-// GitRepo is a registered git repository an agent can request access to (the
-// gitrepo plane). It stores its own credentials — a read credential and/or a
-// write credential (deploy keys, PATs) — which are returned only to an agent
-// holding a matching grant, and are never serialized to JSON. Granters are the
-// principals who may approve access requests (PAM, mirroring Secret.Granters).
-type GitRepo struct {
-	ID              string   `json:"id"`
-	Namespace       string   `json:"namespace"`
-	Name            string   `json:"name"`
-	URL             string   `json:"url"`
-	Description     string   `json:"description,omitempty"` // usage context for the agent (never a credential)
-	ReadCredential  string   `json:"-"`                     // materialized for read grants (empty = none registered)
-	WriteCredential string   `json:"-"`                     // materialized for write grants (empty = none registered)
-	Granters        []string `json:"granters,omitempty"`    // who may approve access (DESIGN.md §8)
-	CreatedAt       string   `json:"createdAt"`
-}
-
-// HasReadCredential / HasWriteCredential report whether a credential is
-// registered for the given access level.
-func (g GitRepo) HasReadCredential() bool  { return g.ReadCredential != "" }
-func (g GitRepo) HasWriteCredential() bool { return g.WriteCredential != "" }
-
-// GitRepoGrant is a durable authorization to access a repository at a given
-// access level. Like a secret Grant, it has no expiry — valid until revoked or
-// until the image digest / spec hash it binds to changes (DESIGN.md §8, §14).
-type GitRepoGrant struct {
-	ID             string `json:"id"`
-	AgentNamespace string `json:"agentNamespace"`
-	AgentName      string `json:"agentName"`
-	ServiceAccount string `json:"serviceAccount,omitempty"`
-	ImageDigest    string `json:"imageDigest"`
-	AgentSpecHash  string `json:"agentSpecHash"`
-	GitRepoID      string `json:"gitRepoId"`
-	Access         string `json:"access"` // read|write (write implies read)
-	ApprovedBy     string `json:"approvedBy"`
-	ApprovedAt     string `json:"approvedAt"`
-	Reason         string `json:"reason,omitempty"`
-	RevokedAt      string `json:"revokedAt,omitempty"`
-	RevokedReason  string `json:"revokedReason,omitempty"`
-}
-
-// GitRepoRequest is a pending git-repo access approval (mirrors SecretRequest).
-type GitRepoRequest struct {
-	ID             string `json:"id"`
-	Status         string `json:"status"` // Pending|Approved|Denied
-	AgentNamespace string `json:"agentNamespace"`
-	AgentName      string `json:"agentName"`
-	RunID          string `json:"runId,omitempty"`
-	GitRepoID      string `json:"gitRepoId"`
-	RepoName       string `json:"repoName,omitempty"`
-	Access         string `json:"access"` // requested level: read|write
-	ImageDigest    string `json:"imageDigest"`
-	Context        string `json:"context,omitempty"`     // the agent's justification ("why") for the approver
-	RequestedBy    string `json:"requestedBy,omitempty"` // Slack user the run is for ("who")
-	CreatedAt      string `json:"createdAt"`
-	NotifiedAt     string `json:"notifiedAt,omitempty"`
 }
 
 // ChannelConfig is per-Slack-channel bot behavior, set via the onboarding flow
@@ -556,11 +482,43 @@ type Model struct {
 	MaxTokens int    `json:"maxTokens,omitempty"`
 	Notes     string `json:"notes,omitempty"`
 	IsDefault bool   `json:"isDefault"`
+	// ProviderName links this model to the Provider whose catalog discovered it;
+	// "" for hand-entered/local models. Discovered rows carry no key of their own
+	// — Resolve inherits the key and base URL from the provider row.
+	ProviderName string `json:"providerName,omitempty"`
+	// Enabled is the selective-disable flag. Disabled models are hidden from
+	// switch_model and never resolve. Defaults to true (discovered + manual).
+	Enabled   bool   `json:"enabled"`
 	UpdatedAt string `json:"updatedAt"`
 }
 
-// ModelProviders are the accepted Model.Provider values.
+// ModelProviders are the accepted Model.Provider values (the runner wire format).
 var ModelProviders = []string{"anthropic", "openai"}
+
+// Provider is a hosted LLM API registered once (kind + key + optional base URL)
+// whose model catalog is pulled periodically to seed the models registry, so an
+// admin doesn't hand-enter every model. The API key is AEAD-encrypted at rest
+// (same Cipher/associated-data envelope as Model keys) and never serialized.
+type Provider struct {
+	Name string `json:"name"` // unique handle, e.g. "openai-prod"
+	Kind string `json:"kind"` // anthropic | openai | gemini (the catalog dialect)
+	// BaseURL overrides the provider's default list+inference endpoint (gateway
+	// or self-hosted). "" = the kind's default.
+	BaseURL string `json:"baseUrl,omitempty"`
+	// APIKeyCiphertext is the AEAD-encrypted API key. Never serialized to JSON.
+	APIKeyCiphertext []byte `json:"-"`
+	Enabled          bool   `json:"enabled"`
+	// ModelPrefix is prepended to each discovered model's handle to avoid clashes
+	// between two providers exposing the same model id ("" = no prefix).
+	ModelPrefix   string `json:"modelPrefix,omitempty"`
+	LastSyncedAt  string `json:"lastSyncedAt,omitempty"`
+	LastSyncError string `json:"lastSyncError,omitempty"`
+	CreatedAt     string `json:"createdAt"`
+	UpdatedAt     string `json:"updatedAt"`
+}
+
+// ProviderKinds are the accepted Provider.Kind values (catalog dialects).
+var ProviderKinds = []string{"anthropic", "openai", "gemini"}
 
 // NowRFC3339 is the canonical timestamp format used for stored rows.
 func NowRFC3339() string { return time.Now().UTC().Format(time.RFC3339Nano) }

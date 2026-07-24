@@ -15,6 +15,10 @@ var additiveColumns = []string{
 	`ALTER TABLE secret_requests ADD COLUMN requested_by TEXT`,
 	`ALTER TABLE intake_tokens ADD COLUMN run_id TEXT`,
 	`ALTER TABLE models ADD COLUMN max_tokens INTEGER NOT NULL DEFAULT 0`,
+	// provider_name links a model to the provider whose catalog discovered it
+	// ("" = hand-entered/local). enabled is the selective-disable flag.
+	`ALTER TABLE models ADD COLUMN provider_name TEXT`,
+	`ALTER TABLE models ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`,
 }
 
 // migrations is the ordered list of schema statements (DESIGN.md §7). All are
@@ -244,7 +248,21 @@ var migrations = []string{
 		notes          TEXT,
 		max_tokens     INTEGER NOT NULL DEFAULT 0,
 		is_default     INTEGER NOT NULL DEFAULT 0,
+		provider_name  TEXT,
+		enabled        INTEGER NOT NULL DEFAULT 1,
 		updated_at     TEXT NOT NULL
+	);`,
+	`CREATE TABLE IF NOT EXISTS providers (
+		name            TEXT PRIMARY KEY,
+		kind            TEXT NOT NULL,
+		base_url        TEXT,
+		api_key_cipher  BLOB,
+		enabled         INTEGER NOT NULL DEFAULT 1,
+		model_prefix    TEXT,
+		last_synced_at  TEXT,
+		last_sync_error TEXT,
+		created_at      TEXT NOT NULL,
+		updated_at      TEXT NOT NULL
 	);`,
 	`CREATE TABLE IF NOT EXISTS session_models (
 		session_id TEXT PRIMARY KEY,

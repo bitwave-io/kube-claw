@@ -23,7 +23,7 @@ type requestScheduleReq struct {
 
 // requestSchedule (POST /v1/runs/{id}/request-schedule) lets an agent PROPOSE a
 // recurring invocation of itself. It is a gated action, mirroring the on-demand
-// secret/gitrepo flow: the schedule is created DISABLED and the run's Slack user
+// secret flow: the schedule is created DISABLED and the run's Slack user
 // is DM'd an approval prompt. The scheduler skips disabled schedules, so nothing
 // fires until a human enables it in the dashboard (/ui/schedules). This keeps an
 // agent from silently arming unattended, recurring runs of itself.
