@@ -27,10 +27,16 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Without a key, the stub still proves the materialize→respond path.
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+	// Build the session up front so we can ask the controller's model registry
+	// what this run resolves to. A model is runnable if EITHER a legacy Anthropic
+	// env key is present OR the registry resolves one (e.g. an OpenAI/Gemini-only
+	// install with no ANTHROPIC_API_KEY). Only when NEITHER holds do we fall back
+	// to the stub — otherwise a provider-only install would silently never run its
+	// configured model.
+	sess := newAgentSession(os.Getenv("CLAW_SYSTEM_PROMPT"))
+	if !modelRunnable(sess) {
 		response := respond(input)
-		fmt.Printf("claw-runner: run=%s input=%q -> %q\n", runID, input, response)
+		fmt.Printf("claw-runner: run=%s input=%q -> %q (no model configured)\n", runID, input, response)
 		if err := postOutput(controllerURL, runID, response); err != nil {
 			fmt.Fprintf(os.Stderr, "claw-runner: posting output: %v\n", err)
 			os.Exit(1)
@@ -40,7 +46,6 @@ func main() {
 
 	// Real agent loop. Turn 1 is CLAW_INPUT; then, for a Slack session, stay warm
 	// and claim follow-up turns until the idle timeout (the pod scales to zero).
-	sess := newAgentSession(os.Getenv("CLAW_SYSTEM_PROMPT"))
 	// Cold-start replay: if this pod is serving a follow-up in an existing thread
 	// (the warm pod idled out), seed the conversation from the store.
 	if sid := os.Getenv("CLAW_SESSION_ID"); sid != "" {

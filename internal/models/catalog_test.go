@@ -51,7 +51,7 @@ func TestCatalogParsing(t *testing.T) {
 		}
 	})
 
-	t.Run("gemini", func(t *testing.T) {
+	t.Run("gemini custom gateway routes inference through the gateway", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("key") != "gem-key" {
 				t.Fatalf("missing key query: %q", r.URL.RawQuery)
@@ -59,15 +59,26 @@ func TestCatalogParsing(t *testing.T) {
 			_, _ = w.Write([]byte(`{"models":[{"name":"models/gemini-2.5-pro"},{"name":"models/gemini-2.5-flash"}]}`))
 		}))
 		defer srv.Close()
-		// BaseURL points at the gemini list root; the "models/" prefix is stripped
-		// and discovered models are registered over the OpenAI-compat endpoint.
+		// BaseURL points at a custom gateway; the "models/" prefix is stripped and
+		// discovered models are registered over the gateway's OpenAI-compat surface
+		// (root + /openai) — NOT Google's default, so the gateway isn't bypassed.
 		got, err := newHTTPCatalog().List(ctx, store2Provider{Kind: "gemini", BaseURL: srv.URL, APIKey: "gem-key"})
 		if err != nil {
 			t.Fatal(err)
 		}
+		wantBase := srv.URL + "/openai"
 		if len(got) != 2 || got[0].ModelID != "gemini-2.5-pro" || got[0].WireFormat != "openai" ||
-			got[0].BaseURL != defaultGeminiOpenAIBase {
-			t.Fatalf("gemini parse = %+v", got)
+			got[0].BaseURL != wantBase {
+			t.Fatalf("gemini parse = %+v (want inference base %q)", got, wantBase)
+		}
+	})
+
+	t.Run("geminiInferenceBase selects gateway vs default", func(t *testing.T) {
+		if got := geminiInferenceBase("", "https://generativelanguage.googleapis.com/v1beta"); got != defaultGeminiOpenAIBase {
+			t.Fatalf("no override → %q, want default %q", got, defaultGeminiOpenAIBase)
+		}
+		if got := geminiInferenceBase("https://gw.internal/gemini", "https://gw.internal/gemini"); got != "https://gw.internal/gemini/openai" {
+			t.Fatalf("override → %q, want gateway openai surface", got)
 		}
 	})
 

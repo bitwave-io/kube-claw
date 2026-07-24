@@ -321,19 +321,29 @@ func (s *Service) SyncProvider(ctx context.Context, name string) error {
 			hasDefault = false
 		}
 		added, firstHandle := 0, ""
+		skipped := []string{}
 		for _, d := range discovered {
 			handle := sanitizeHandle(prov.ModelPrefix + d.ModelID)
 			if handle == "" {
 				continue
 			}
-			if firstHandle == "" {
-				firstHandle = handle
-			}
 			enabled := true
 			if existing, err := tx.GetModel(handle); err == nil {
-				enabled = existing.Enabled // preserve a prior manual disable
+				// A handle already owned by a manual model (ProviderName "") or a
+				// DIFFERENT provider is not ours to overwrite — clobbering it would
+				// silently repoint someone else's model at this provider's endpoint
+				// and key. Skip it and record the collision. The admin resolves it
+				// by renaming or setting a ModelPrefix on this provider.
+				if existing.ProviderName != name {
+					skipped = append(skipped, handle)
+					continue
+				}
+				enabled = existing.Enabled // preserve a prior manual disable of our own row
 			} else {
 				added++
+			}
+			if firstHandle == "" {
+				firstHandle = handle
 			}
 			if err := tx.UpsertModel(store.Model{
 				Name:         handle,
@@ -356,7 +366,7 @@ func (s *Service) SyncProvider(ctx context.Context, name string) error {
 			return err
 		}
 		return tx.AppendAudit(store.AuditEvent{Type: "provider.synced", Actor: "sync",
-			Detail: map[string]any{"provider": name, "discovered": len(discovered), "new": added}})
+			Detail: map[string]any{"provider": name, "discovered": len(discovered), "new": added, "skippedCollisions": skipped}})
 	})
 }
 

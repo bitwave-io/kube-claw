@@ -118,9 +118,9 @@ func (c *httpCatalog) listAnthropic(ctx context.Context, p store2Provider) ([]Di
 func (c *httpCatalog) listGemini(ctx context.Context, p store2Provider) ([]DiscoveredModel, error) {
 	// Gemini's native list endpoint lives under v1beta, not the OpenAI-compat
 	// path; derive it from the OpenAI base (or an explicit override root).
-	listBase := firstNonEmpty(p.BaseURL, "https://generativelanguage.googleapis.com/v1beta")
-	listBase = strings.TrimSuffix(strings.TrimRight(listBase, "/"), "/openai")
-	u := listBase + "/models"
+	root := firstNonEmpty(p.BaseURL, "https://generativelanguage.googleapis.com/v1beta")
+	root = strings.TrimSuffix(strings.TrimRight(root, "/"), "/openai")
+	u := root + "/models"
 	if p.APIKey != "" {
 		u += "?key=" + p.APIKey
 	}
@@ -140,17 +140,29 @@ func (c *httpCatalog) listGemini(ctx context.Context, p store2Provider) ([]Disco
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("gemini catalog: bad json: %w", err)
 	}
+	inferBase := geminiInferenceBase(p.BaseURL, root)
 	out := make([]DiscoveredModel, 0, len(parsed.Models))
 	for _, m := range parsed.Models {
 		id := strings.TrimPrefix(m.Name, "models/")
 		if id == "" {
 			continue
 		}
-		// Register over the OpenAI-compat endpoint so the runner's existing
-		// OpenAI seam serves it. An explicit BaseURL override is honored as-is.
-		out = append(out, DiscoveredModel{ModelID: id, WireFormat: "openai", BaseURL: defaultGeminiOpenAIBase, InheritsKey: true})
+		out = append(out, DiscoveredModel{ModelID: id, WireFormat: "openai", BaseURL: inferBase, InheritsKey: true})
 	}
 	return out, nil
+}
+
+// geminiInferenceBase picks the OpenAI-compat endpoint discovered gemini models
+// are registered to run against. With a custom gateway configured (baseURL != "")
+// inference MUST route through that gateway's openai-compat surface (root +
+// "/openai"), not Google directly — otherwise a gateway-scoped key leaks to
+// Google and the gateway is bypassed. root is the already-normalized listing root
+// (baseURL with a trailing "/openai" stripped). No override → Google's default.
+func geminiInferenceBase(baseURL, root string) string {
+	if baseURL == "" {
+		return defaultGeminiOpenAIBase
+	}
+	return root + "/openai"
 }
 
 // getDataIDs runs a request whose body is {"data":[{"id":...}]} (the shape both

@@ -205,6 +205,44 @@ func TestSyncProviderAndResolve(t *testing.T) {
 	}
 }
 
+// TestSyncProviderHandleCollision verifies a catalog sync never overwrites a
+// handle it doesn't own — neither a hand-entered model nor one from a different
+// provider. Clobbering would silently repoint someone else's model at this
+// provider's endpoint and key.
+func TestSyncProviderHandleCollision(t *testing.T) {
+	ctx := context.Background()
+	svc := testService(t)
+
+	// A hand-entered model named exactly what the provider's sync will produce.
+	if err := svc.Upsert(ctx, store.Model{Name: "gpt-5.2", Provider: "openai", ModelID: "manual-pin", BaseURL: "https://manual.example/v1"}, "sk-manual", true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Provider with NO prefix, so its discovered "gpt-5.2" collides with the manual one.
+	svc.Catalog = stubCatalog{ids: []DiscoveredModel{
+		{ModelID: "gpt-5.2", WireFormat: "openai", InheritsKey: true},
+		{ModelID: "gpt-5-mini", WireFormat: "openai", InheritsKey: true},
+	}}
+	if err := svc.UpsertProvider(ctx, store.Provider{Name: "openai-prod", Kind: "openai", Enabled: true}, "sk-provider"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SyncProvider(ctx, "openai-prod"); err != nil {
+		t.Fatal(err)
+	}
+
+	list, _ := svc.List(ctx)
+	m := modelByName(list, "gpt-5.2")
+	// The manual model must be untouched: still manual (no ProviderName), own key,
+	// own endpoint and model id.
+	if m.ProviderName != "" || m.ModelID != "manual-pin" || m.BaseURL != "https://manual.example/v1" || len(m.APIKeyCiphertext) == 0 {
+		t.Fatalf("sync overwrote a colliding manual model: %+v", m)
+	}
+	// The non-colliding discovered model still lands.
+	if got := modelByName(list, "gpt-5-mini"); got.ProviderName != "openai-prod" {
+		t.Fatalf("non-colliding discovered model should land: %+v", got)
+	}
+}
+
 func modelByName(list []store.Model, name string) store.Model {
 	for _, m := range list {
 		if m.Name == name {
