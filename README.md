@@ -219,14 +219,27 @@ materialize → respond path).
 
 ### Models (multi-provider)
 
-The admin UI's **Models** page is the LLM registry: register Anthropic models,
-OpenAI models, or **any OpenAI-compatible endpoint** (vLLM, Ollama, OpenRouter,
-LM Studio — set the base URL, leave the key blank for keyless local engines),
-and pick the **install default** every conversation starts on. API keys are
-AEAD-encrypted in the store (write-only in the UI) and handed to run pods
-per-turn over the same authenticated channel as secret materialization — never
-via pod env. Any thread can switch among *registered* models by just asking
-the agent; the reply footer's model tag confirms what actually served. With no
+The admin UI's **Models** page is the LLM registry. Two ways to populate it:
+
+- **Register a provider** (OpenAI, Anthropic, Gemini) with just an API key. The
+  controller pulls that provider's **whole model catalog** via its list-models
+  API and keeps it fresh with a periodic background sync (a leader-elected
+  Runnable, default every 6h) plus a **Refresh now** button. Newly released
+  models show up on their own; **disable** the ones you don't want and the
+  disable sticks across resyncs. Gemini models are registered over Gemini's
+  OpenAI-compatibility endpoint, so they run through the same wire-format path
+  as OpenAI with no extra code.
+- **Add a model by hand** for a local / self-hosted **OpenAI-compatible
+  endpoint** (vLLM, Ollama, OpenRouter, LM Studio — set the base URL, leave the
+  key blank for keyless local engines).
+
+Pick the **install default** every conversation starts on. Only **enabled**
+models are reachable from chat: any thread can switch among them by just asking
+the agent (the reply footer's model tag confirms what actually served). API keys
+— provider keys and hand-entered model keys alike — are AEAD-encrypted in the
+store (write-only in the UI); a discovered model inherits its provider's key and
+endpoint at resolution time. Keys are handed to run pods per-turn over the same
+authenticated channel as secret materialization — never via pod env. With no
 models registered, the runner uses the legacy env config
 (`claw-anthropic-key` + `CLAW_MODEL`), so existing installs upgrade cleanly.
 Each model takes an optional **max output tokens** cap — leave it blank to use
@@ -320,37 +333,6 @@ transient failures; outputs stay queryable via `/v1/runs/{id}` regardless.
 Session ids are namespaced per connector internally, so a connector can never
 join or replay another connector's (or a Slack thread's) warm session. Keys are
 stored hashed, rotatable via `POST /v1/connectors/{id}/rotate-key`.
-
----
-
-## Git repos (agent-requestable repositories)
-
-A git repository is a grantable resource, like a secret: an admin registers it
-(URL + credentials + who may approve), and an agent requests access **by name**
-at a level — `read` or `write` — at runtime. The request goes to the repo's
-granters for approval and becomes a durable grant bound to the agent's image
-digest + spec hash + access level (exactly like a secret grant).
-
-```bash
-# Register (admin surface). A read grant hands back readCredential; a write grant
-# hands back writeCredential — a read grant literally never sees the write key.
-curl -u admin:$ADMIN_PASSWORD -X POST $CLAW_CONTROLLER_URL/v1/gitrepos -d '{
-  "name": "infra",
-  "url": "https://github.com/acme/infra.git",
-  "description": "terraform modules",
-  "readCredential": "<ro-token-or-deploy-key>",
-  "writeCredential": "<rw-token-or-deploy-key>",
-  "granters": ["U_BOSS"]
-}'
-```
-
-At runtime the agent lists what it can request (`GET
-/v1/runs/{id}/available-gitrepos`), requests access
-(`POST /v1/runs/{id}/request-gitrepo` with `{name, access, reason}`), and once a
-granter approves (`POST /v1/gitrepo-requests/{id}/approve`) retrieves the URL +
-credential for its granted level (`GET /v1/runs/{id}/requested-gitrepo?name=…`).
-Credentials are never listed or returned except to a granted agent; every step
-is audited. Grants are revocable via `POST /v1/gitrepo-grants/{id}/revoke`.
 
 ---
 

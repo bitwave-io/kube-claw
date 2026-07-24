@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -21,6 +23,32 @@ type modelChoice struct {
 	ModelID   string `json:"modelId"`
 	Notes     string `json:"notes"`
 	IsDefault bool   `json:"isDefault"`
+}
+
+// modelRunnable reports whether this session can actually run a model, so main()
+// can decide between the real agent loop and the demo stub. A legacy Anthropic
+// env key always counts. Otherwise we consult the controller's registry: an
+// OpenAI/Gemini-only install carries no ANTHROPIC_API_KEY but resolves a real
+// model over the OpenAI wire seam, and must NOT be shunted to the stub. The
+// probe reuses refreshModelConfig (which sets the session client/model as a side
+// effect), so a successful probe also warms the session for its first turn.
+func modelRunnable(s *agentSession) bool {
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		return true
+	}
+	if s.controllerURL == "" || s.runID == "" || os.Getenv("CLAW_TOKEN") == "" {
+		return false // no env key and no way to reach the registry
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	s.refreshModelConfig(ctx)
+	// A registry-resolved model sets modelName; an anthropic-provider row with no
+	// env key still isn't runnable (the client has no credential), so require a
+	// non-anthropic wire format OR an explicit per-model key.
+	if s.modelName == "" {
+		return false
+	}
+	return s.modelProvider != "anthropic" || s.modelAPIKey != ""
 }
 
 // refreshModelConfig resolves the session's model from the controller's

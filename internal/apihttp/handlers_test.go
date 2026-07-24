@@ -20,7 +20,6 @@ import (
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/approvals"
-	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
 	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
@@ -71,7 +70,6 @@ func fullServer(t *testing.T, seed ...client.Object) *Server {
 	return &Server{
 		Store: st, Reader: reader, Secrets: secSvc, Signer: signer, UIBase: "http://ui",
 		Approvals: &approvals.Service{Store: st, Secrets: secSvc, Reader: reader},
-		GitRepos:  &gitrepo.Service{Store: st, Reader: reader},
 	}
 }
 

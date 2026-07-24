@@ -12,28 +12,42 @@ import (
 // key material; blank means "unchanged").
 func (t *tx) UpsertModel(m store.Model) error {
 	_, err := t.tx.Exec(
-		`INSERT INTO models (name, provider, model_id, base_url, api_key_cipher, notes, max_tokens, is_default, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)
+		`INSERT INTO models (name, provider, model_id, base_url, api_key_cipher, notes, max_tokens, is_default, provider_name, enabled, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   provider=excluded.provider, model_id=excluded.model_id,
 		   base_url=excluded.base_url,
 		   api_key_cipher=CASE WHEN length(excluded.api_key_cipher) > 0 THEN excluded.api_key_cipher ELSE models.api_key_cipher END,
-		   notes=excluded.notes, max_tokens=excluded.max_tokens, updated_at=excluded.updated_at`,
-		m.Name, m.Provider, m.ModelID, m.BaseURL, m.APIKeyCiphertext, m.Notes, m.MaxTokens, boolInt(m.IsDefault), store.NowRFC3339())
+		   notes=excluded.notes, max_tokens=excluded.max_tokens,
+		   provider_name=excluded.provider_name, enabled=excluded.enabled, updated_at=excluded.updated_at`,
+		m.Name, m.Provider, m.ModelID, m.BaseURL, m.APIKeyCiphertext, m.Notes, m.MaxTokens, boolInt(m.IsDefault), m.ProviderName, boolInt(m.Enabled), store.NowRFC3339())
 	return err
+}
+
+// SetModelEnabled flips a model's enabled flag.
+func (t *tx) SetModelEnabled(name string, enabled bool) error {
+	res, err := t.tx.Exec(`UPDATE models SET enabled=?, updated_at=? WHERE name=?`,
+		boolInt(enabled), store.NowRFC3339(), name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // GetModel returns a model by name, or ErrNotFound.
 func (t *tx) GetModel(name string) (store.Model, error) {
 	return t.scanModel(t.tx.QueryRow(
-		`SELECT name, provider, model_id, base_url, api_key_cipher, notes, max_tokens, is_default, updated_at
+		`SELECT name, provider, model_id, base_url, api_key_cipher, notes, max_tokens, is_default, provider_name, enabled, updated_at
 		 FROM models WHERE name=?`, name))
 }
 
 // ListModels returns all configured models, default first then by name.
 func (t *tx) ListModels() ([]store.Model, error) {
 	rows, err := t.tx.Query(
-		`SELECT name, provider, model_id, base_url, api_key_cipher, notes, max_tokens, is_default, updated_at
+		`SELECT name, provider, model_id, base_url, api_key_cipher, notes, max_tokens, is_default, provider_name, enabled, updated_at
 		 FROM models ORDER BY is_default DESC, name`)
 	if err != nil {
 		return nil, err
@@ -77,7 +91,7 @@ func (t *tx) SetDefaultModel(name string) error {
 // GetDefaultModel returns the default model, or ErrNotFound when none is set.
 func (t *tx) GetDefaultModel() (store.Model, error) {
 	return t.scanModel(t.tx.QueryRow(
-		`SELECT name, provider, model_id, base_url, api_key_cipher, notes, max_tokens, is_default, updated_at
+		`SELECT name, provider, model_id, base_url, api_key_cipher, notes, max_tokens, is_default, provider_name, enabled, updated_at
 		 FROM models WHERE is_default=1`))
 }
 
@@ -104,15 +118,16 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func (t *tx) scanModel(r rowScanner) (store.Model, error) {
 	var m store.Model
-	var baseURL, notes sql.NullString
-	var isDefault int
-	err := r.Scan(&m.Name, &m.Provider, &m.ModelID, &baseURL, &m.APIKeyCiphertext, &notes, &m.MaxTokens, &isDefault, &m.UpdatedAt)
+	var baseURL, notes, providerName sql.NullString
+	var isDefault, enabled int
+	err := r.Scan(&m.Name, &m.Provider, &m.ModelID, &baseURL, &m.APIKeyCiphertext, &notes, &m.MaxTokens, &isDefault, &providerName, &enabled, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.Model{}, store.ErrNotFound
 	}
 	if err != nil {
 		return store.Model{}, err
 	}
-	m.BaseURL, m.Notes, m.IsDefault = baseURL.String, notes.String, isDefault == 1
+	m.BaseURL, m.Notes, m.ProviderName = baseURL.String, notes.String, providerName.String
+	m.IsDefault, m.Enabled = isDefault == 1, enabled == 1
 	return m, nil
 }

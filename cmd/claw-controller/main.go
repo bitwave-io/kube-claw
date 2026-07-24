@@ -32,9 +32,9 @@ import (
 	"github.com/traego/kube-claw/internal/approvals"
 	"github.com/traego/kube-claw/internal/artifacts"
 	"github.com/traego/kube-claw/internal/controller"
-	"github.com/traego/kube-claw/internal/gitrepo"
 	"github.com/traego/kube-claw/internal/identity"
 	"github.com/traego/kube-claw/internal/models"
+	"github.com/traego/kube-claw/internal/providersync"
 	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/runengine"
 	"github.com/traego/kube-claw/internal/scheduler"
@@ -146,7 +146,6 @@ func main() {
 	}
 	idProvider := &identity.KubernetesSAProvider{Client: clientset, Audience: "claw-controller"}
 	approvalSvc := &approvals.Service{Store: st, Secrets: secSvc, Reader: mgr.GetAPIReader()}
-	gitRepoSvc := &gitrepo.Service{Store: st, Reader: mgr.GetAPIReader()}
 	artifactSvc := &artifacts.Service{Store: st, TTL: artifactTTL, MaxTTL: artifactMaxTTL}
 
 	// Slack connector router (channel→agent routing + run creation). Built when
@@ -234,7 +233,6 @@ func main() {
 		Signer:                signer,
 		Approvals:             approvalSvc,
 		Artifacts:             artifactSvc,
-		GitRepos:              gitRepoSvc,
 		Models:                modelSvc,
 		Router:                slackRt,
 		Notifier:              slackNotifier,
@@ -284,6 +282,10 @@ func main() {
 
 	if err := mgr.Add(&scheduler.Scheduler{Store: st, Interval: 30 * time.Second}); err != nil {
 		log.Error(err, "unable to add scheduler")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&providersync.Syncer{Models: modelSvc, Interval: 6 * time.Hour}); err != nil {
+		log.Error(err, "unable to add provider catalog sync")
 		os.Exit(1)
 	}
 

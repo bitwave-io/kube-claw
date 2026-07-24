@@ -100,6 +100,110 @@ func (s *Server) setDefaultModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// setModelEnabled toggles a model's enabled flag (selective disable).
+func (s *Server) setModelEnabled(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(r) {
+		writeErr(w, http.StatusUnauthorized, "admin credentials required")
+		return
+	}
+	var in struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	if err := s.Models.SetModelEnabled(r.Context(), r.PathValue("name"), in.Enabled); err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeErr(w, code, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type providerView struct {
+	store.Provider
+	HasKey bool `json:"hasKey"`
+}
+
+func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(r) {
+		writeErr(w, http.StatusUnauthorized, "admin credentials required")
+		return
+	}
+	list, err := s.Models.ListProviders(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]providerView, 0, len(list))
+	for _, p := range list {
+		out = append(out, providerView{Provider: p, HasKey: len(p.APIKeyCiphertext) > 0})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) upsertProvider(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(r) {
+		writeErr(w, http.StatusUnauthorized, "admin credentials required")
+		return
+	}
+	var in struct {
+		Name        string `json:"name"`
+		Kind        string `json:"kind"`
+		BaseURL     string `json:"baseUrl"`
+		APIKey      string `json:"apiKey"`
+		Enabled     bool   `json:"enabled"`
+		ModelPrefix string `json:"modelPrefix"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	p := store.Provider{Name: in.Name, Kind: in.Kind, BaseURL: in.BaseURL, Enabled: in.Enabled, ModelPrefix: in.ModelPrefix}
+	if err := s.Models.UpsertProvider(r.Context(), p, in.APIKey); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(r) {
+		writeErr(w, http.StatusUnauthorized, "admin credentials required")
+		return
+	}
+	if err := s.Models.DeleteProvider(r.Context(), r.PathValue("name")); err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeErr(w, code, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// syncProvider triggers an immediate catalog refresh ("Refresh now").
+func (s *Server) syncProvider(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(r) {
+		writeErr(w, http.StatusUnauthorized, "admin credentials required")
+		return
+	}
+	if err := s.Models.SyncProvider(r.Context(), r.PathValue("name")); err != nil {
+		code := http.StatusBadGateway // catalog fetch failed
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeErr(w, code, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // runModel returns the resolved model for the calling run's session, plus the
 // registry names (for the switch_model tool's listing). 404 when the registry
 // is empty — the runner falls back to its env config (legacy installs).
@@ -127,7 +231,7 @@ func (s *Server) runModel(w http.ResponseWriter, r *http.Request) {
 		IsDefault bool   `json:"isDefault"`
 	}
 	var available []choice
-	if list, err := s.Models.List(r.Context()); err == nil {
+	if list, err := s.Models.ListEnabled(r.Context()); err == nil {
 		for _, m := range list {
 			available = append(available, choice{Name: m.Name, Provider: m.Provider, ModelID: m.ModelID, Notes: m.Notes, IsDefault: m.IsDefault})
 		}

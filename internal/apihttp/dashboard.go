@@ -68,7 +68,6 @@ button{font:inherit;padding:.3rem .7rem;border:1px solid var(--accent);backgroun
 <nav><span class=brand><img src=/ui/logo.png alt="" style="height:1.3rem;width:auto;vertical-align:-.28rem;margin-right:.4rem"> kube-claw</span>
 <a href=/ui/dashboard class="{{if eq .Active "dashboard"}}on{{end}}">Dashboard</a>
 <a href=/ui/secrets class="{{if eq .Active "secrets"}}on{{end}}">Secrets</a>
-<a href=/ui/gitrepos class="{{if eq .Active "gitrepos"}}on{{end}}">Git repos</a>
 <a href=/ui/requests class="{{if eq .Active "requests"}}on{{end}}">Requests</a>
 <a href=/ui/conversations class="{{if eq .Active "conversations"}}on{{end}}">Conversations</a>
 <a href=/ui/audit class="{{if eq .Active "audit"}}on{{end}}">Audit</a>
@@ -212,23 +211,9 @@ func (s *Server) requestsPage(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
-	// Pending git-repo access requests share this page (same break-glass flow).
-	type gitRow struct {
-		store.GitRepoRequest
-		ByDisplay string
-	}
-	var gitRows []gitRow
-	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
-		got, e := tx.ListGitRepoRequests("Pending")
-		for _, rq := range got {
-			gitRows = append(gitRows, gitRow{GitRepoRequest: rq, ByDisplay: s.slackUser(r.Context(), rq.RequestedBy)})
-		}
-		return e
-	})
 	data := struct {
-		Secrets  []reqRow
-		GitRepos []gitRow
-	}{rows, gitRows}
+		Secrets []reqRow
+	}{rows}
 	body := `<p class=mut>Pending access requests. The agent's reason and who it's for are shown so you can make an informed call. Approving here is break-glass (it bypasses the Slack granter check) and is audited.</p>
 <h2>Secrets</h2>
 <table><tr><th>When</th><th>Agent</th><th>Secret</th><th>For (who)</th><th>Reason (why)</th><th></th></tr>
@@ -240,19 +225,7 @@ func (s *Server) requestsPage(w http.ResponseWriter, r *http.Request) {
 <form method=post action=/ui/requests/approve style=margin:0><input type=hidden name=id value="{{.ID}}"><button>Approve</button></form>
 <form method=post action=/ui/requests/deny style=margin:0><input type=hidden name=id value="{{.ID}}"><button style="background:#c5221f;border-color:#c5221f">Deny</button></form>
 </td>
-</tr>{{else}}<tr><td colspan=6 class=mut>No pending secret requests.</td></tr>{{end}}</table>
-<h2>Git repos</h2>
-<table><tr><th>When</th><th>Agent</th><th>Repo</th><th>Access</th><th>For (who)</th><th>Reason (why)</th><th></th></tr>
-{{range .D.GitRepos}}<tr>
-<td class=mut>{{.CreatedAt}}</td><td><code>{{.AgentName}}</code></td><td><code>{{.RepoName}}</code></td>
-<td><code>{{.Access}}</code></td>
-<td>{{if .ByDisplay}}{{.ByDisplay}}{{else}}<span class=mut>—</span>{{end}}</td>
-<td>{{if .Context}}{{.Context}}{{else}}<span class=mut>(none)</span>{{end}}</td>
-<td style="display:flex;gap:.4rem">
-<form method=post action=/ui/gitrepo-requests/approve style=margin:0><input type=hidden name=id value="{{.ID}}"><button>Approve</button></form>
-<form method=post action=/ui/gitrepo-requests/deny style=margin:0><input type=hidden name=id value="{{.ID}}"><button style="background:#c5221f;border-color:#c5221f">Deny</button></form>
-</td>
-</tr>{{else}}<tr><td colspan=7 class=mut>No pending git-repo requests.</td></tr>{{end}}</table>`
+</tr>{{else}}<tr><td colspan=6 class=mut>No pending secret requests.</td></tr>{{end}}</table>`
 	s.renderDash(w, "requests", "Access requests", body, data)
 }
 
